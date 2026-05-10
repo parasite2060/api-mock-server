@@ -1,0 +1,18 @@
+{
+  "name": "api-mock-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Programmable API mock server — OpenAI-compatible chat completions with stub registration",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "jsonpath-plus": "^10.2.0",
+    "micromatch": "^4.0.8"
+  },
+  "devDependencies": {
+    "@types/micromatch": "^4.0.9",
+    "@types/bun": "latest"
+  }
+}
