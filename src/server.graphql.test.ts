@@ -33,4 +33,22 @@ describe('graphql listener', () => {
     expect(res.status).toBe(200);
     expect((await res.json()).errors[0].message).toBe('no_matching_stub');
   });
+
+  it('returns invalid_json error when body is not valid JSON', async () => {
+    const res = await fetch(`http://localhost:${PORT}/graphql`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: 'not json',
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).errors[0].message).toBe('invalid_json');
+  });
+
+  it('returns invalid_query error when query is malformed and no schema is registered', async () => {
+    const res = await fetch(`http://localhost:${PORT}/graphql`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: '{ !!!malformed' }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).errors[0].message).toBe('invalid_query');
+  });
 });

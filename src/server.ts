@@ -21,7 +21,14 @@ export function startGraphQLServer(port: number) {
           status: 404, headers: { 'Content-Type': 'application/json' },
         });
       }
-      const body = (await req.json()) as GraphQLBody;
+      let body: GraphQLBody;
+      try {
+        body = (await req.json()) as GraphQLBody;
+      } catch {
+        return new Response(JSON.stringify({ errors: [{ message: 'invalid_json' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
       const validationErrors = validateQuery(body.query);
       if (validationErrors) {
         return new Response(JSON.stringify({ errors: validationErrors }), {
@@ -30,7 +37,14 @@ export function startGraphQLServer(port: number) {
       }
       const headers: Record<string, string> = {};
       req.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
-      const stub = findMatch(graphqlToCanonical(body, headers), 'graphql');
+      let stub;
+      try {
+        stub = findMatch(graphqlToCanonical(body, headers), 'graphql');
+      } catch {
+        return new Response(JSON.stringify({ errors: [{ message: 'invalid_query' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
       if (!stub) {
         return new Response(JSON.stringify({ errors: [{ message: 'no_matching_stub' }] }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
