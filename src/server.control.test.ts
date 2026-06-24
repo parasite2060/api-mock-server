@@ -14,6 +14,8 @@ beforeAll(() => {
 });
 afterEach(() => {
   clearStubs();
+  clearProtos();
+  clearSchema();
 });
 afterAll(() => {
   srv.stop(true);
@@ -51,5 +53,46 @@ describe('control plane', () => {
       body: JSON.stringify({ transport: 'graphql', matchers: [{ field: 'url', op: 'exact', value: '/graphql' }], response: { status: 200, body: {} } }),
     });
     expect(res.status).toBe(201);
+  });
+  it('deletes all protos and health reflects empty protos', async () => {
+    await fetch(`${base()}/proto`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'u.proto', content: 'syntax="proto3"; service S { rpc M (Q) returns (R); } message Q {} message R {}' }),
+    });
+    const beforeHealth = await fetch(`${base()}/health`);
+    const beforeBody = (await beforeHealth.json()) as { protos: string[]; schema: boolean };
+    expect(beforeBody.protos.length).toBeGreaterThan(0);
+
+    const del = await fetch(`${base()}/proto`, { method: 'DELETE' });
+    expect(del.status).toBe(204);
+
+    const afterHealth = await fetch(`${base()}/health`);
+    const afterBody = (await afterHealth.json()) as { protos: string[]; schema: boolean };
+    expect(afterBody.protos).toEqual([]);
+  });
+  it('deletes the graphql schema and health reflects schema: false', async () => {
+    await fetch(`${base()}/schema`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sdl: 'type Query { me: String }' }),
+    });
+    const beforeHealth = await fetch(`${base()}/health`);
+    const beforeBody = (await beforeHealth.json()) as { protos: string[]; schema: boolean };
+    expect(beforeBody.schema).toBe(true);
+
+    const del = await fetch(`${base()}/schema`, { method: 'DELETE' });
+    expect(del.status).toBe(204);
+
+    const afterHealth = await fetch(`${base()}/health`);
+    const afterBody = (await afterHealth.json()) as { protos: string[]; schema: boolean };
+    expect(afterBody.schema).toBe(false);
+  });
+  it('rejects an invalid graphql schema with 400 invalid_schema', async () => {
+    const res = await fetch(`${base()}/schema`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sdl: 'not valid sdl {{{{' }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('invalid_schema');
   });
 });
