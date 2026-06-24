@@ -4,11 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 
-interface MethodDef {
-  requestType: { decode: (b: Buffer) => unknown; toObject: (m: unknown, o?: object) => object };
-  responseType: { encode: (m: unknown) => { finish: () => Uint8Array }; fromObject: (o: object) => unknown };
+export interface MethodDef {
+  path: string;
   requestStream: boolean;
   responseStream: boolean;
+  requestSerialize: (value: unknown) => Buffer;
+  requestDeserialize: (bytes: Buffer) => object;
+  responseSerialize: (value: unknown) => Buffer;
+  responseDeserialize: (bytes: Buffer) => object;
 }
 
 let services: Record<string, Record<string, MethodDef>> = {};
@@ -50,4 +53,9 @@ export function listServices(): string[] {
 
 export function lookupMethod(service: string, method: string): MethodDef | null {
   return services[service]?.[method] ?? null;
+}
+
+export function listMethods(service: string): { name: string; def: MethodDef }[] {
+  const methods = services[service] ?? {};
+  return Object.entries(methods).map(([name, def]) => ({ name, def }));
 }

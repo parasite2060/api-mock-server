@@ -1,6 +1,9 @@
+import * as grpc from '@grpc/grpc-js';
 import { clearStubs, findMatch, registerStub, type StubInput } from './core/store';
+import { listMethods, listServices } from './control/proto-registry';
 import { restToCanonical, restToWire } from './transports/rest';
 import { graphqlToCanonical, graphqlToWire, validateQuery, type GraphQLBody } from './transports/graphql';
+import { grpcResponseObject, grpcToCanonical, statusToGrpc } from './transports/grpc';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
 
@@ -56,6 +59,71 @@ export function startGraphQLServer(port: number) {
       const wire = graphqlToWire(stub);
       return new Response(wire.body, { status: wire.status, headers: { 'Content-Type': 'application/json' } });
     },
+  });
+}
+
+function makeUnaryHandler(service: string, method: string, streaming: boolean) {
+  return (call: grpc.ServerUnaryCall<object, object>, cb: grpc.sendUnaryData<object>): void => {
+    if (streaming) {
+      cb({ code: grpc.status.UNIMPLEMENTED, message: 'unary only' });
+      return;
+    }
+    const metadata: Record<string, string> = {};
+    for (const [k, v] of Object.entries(call.metadata.getMap())) metadata[k] = String(v);
+    const req = grpcToCanonical(service, method, call.request, metadata);
+    const stub = findMatch(req, 'grpc');
+    if (!stub) {
+      cb({ code: grpc.status.UNIMPLEMENTED, message: 'no_matching_stub' });
+      return;
+    }
+    const grpcCode = statusToGrpc(stub.response.status);
+    if (grpcCode !== grpc.status.OK) {
+      cb({ code: grpcCode, message: JSON.stringify(stub.response.body) });
+      return;
+    }
+    try {
+      cb(null, grpcResponseObject(stub));
+    } catch (e) {
+      cb({ code: grpc.status.INTERNAL, message: (e as Error).message });
+    }
+  };
+}
+
+function buildServiceDefinitions(): {
+  definition: grpc.ServiceDefinition;
+  implementation: grpc.UntypedServiceImplementation;
+}[] {
+  const out: { definition: grpc.ServiceDefinition; implementation: grpc.UntypedServiceImplementation }[] = [];
+  for (const service of listServices()) {
+    const definition: Record<string, grpc.MethodDefinition<object, object>> = {};
+    const implementation: grpc.UntypedServiceImplementation = {};
+    for (const { name, def } of listMethods(service)) {
+      definition[name] = {
+        path: `/${service}/${name}`,
+        requestStream: def.requestStream,
+        responseStream: def.responseStream,
+        requestSerialize: (value: object) => def.requestSerialize(value),
+        requestDeserialize: (bytes: Buffer) => def.requestDeserialize(bytes),
+        responseSerialize: (value: object) => def.responseSerialize(value),
+        responseDeserialize: (bytes: Buffer) => def.responseDeserialize(bytes),
+      };
+      implementation[name] = makeUnaryHandler(service, name, def.requestStream || def.responseStream);
+    }
+    out.push({ definition, implementation });
+  }
+  return out;
+}
+
+export function startGrpcServer(port: number): Promise<grpc.Server> {
+  const server = new grpc.Server();
+  for (const { definition, implementation } of buildServiceDefinitions()) {
+    server.addService(definition, implementation);
+  }
+  return new Promise((resolve, reject) => {
+    server.bindAsync(`0.0.0.0:${port}`, grpc.ServerCredentials.createInsecure(), (err) => {
+      if (err) return reject(err);
+      resolve(server);
+    });
   });
 }
 
