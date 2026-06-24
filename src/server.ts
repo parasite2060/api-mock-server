@@ -1,6 +1,7 @@
 import * as grpc from '@grpc/grpc-js';
 import { clearStubs, findMatch, registerStub, type StubInput } from './core/store';
-import { listMethods, listServices } from './control/proto-registry';
+import { addProto, clearProtos, listMethods, listServices } from './control/proto-registry';
+import { setSchema, clearSchema, getSchema } from './control/schema-registry';
 import { restToCanonical, restToWire } from './transports/rest';
 import { graphqlToCanonical, graphqlToWire, validateQuery, type GraphQLBody } from './transports/graphql';
 import { grpcResponseObject, grpcToCanonical, statusToGrpc } from './transports/grpc';
@@ -127,68 +128,95 @@ export function startGrpcServer(port: number): Promise<grpc.Server> {
   });
 }
 
+export function startControlServer(port: number) {
+  return Bun.serve({
+    port,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const { pathname } = url;
+      const { method } = req;
+
+      // GET /health
+      if (method === 'GET' && pathname === '/health') {
+        return jsonResponse({ status: 'ok', protos: listServices(), schema: getSchema() != null }, 200);
+      }
+
+      // POST /mock — register a stub
+      if (method === 'POST' && pathname === '/mock') {
+        const input = (await req.json()) as StubInput;
+        const stub = registerStub(input);
+        return jsonResponse({ id: stub.id }, 201);
+      }
+
+      // DELETE /mock — clear all stubs
+      if (method === 'DELETE' && pathname === '/mock') {
+        clearStubs();
+        return new Response(null, { status: 204 });
+      }
+
+      // POST /proto — upload a proto definition
+      if (method === 'POST' && pathname === '/proto') {
+        const { name, content } = (await req.json()) as { name: string; content: string };
+        try { addProto(name, content); } catch (e) {
+          return jsonResponse({ error: 'invalid_proto', detail: (e as Error).message }, 400);
+        }
+        return jsonResponse({ ok: true }, 201);
+      }
+
+      // DELETE /proto — clear all protos
+      if (method === 'DELETE' && pathname === '/proto') { clearProtos(); return new Response(null, { status: 204 }); }
+
+      // POST /schema — upload a GraphQL schema
+      if (method === 'POST' && pathname === '/schema') {
+        const { sdl } = (await req.json()) as { sdl: string };
+        try { setSchema(sdl); } catch (e) {
+          return jsonResponse({ error: 'invalid_schema', detail: (e as Error).message }, 400);
+        }
+        return jsonResponse({ ok: true }, 201);
+      }
+
+      // DELETE /schema — clear the GraphQL schema
+      if (method === 'DELETE' && pathname === '/schema') { clearSchema(); return new Response(null, { status: 204 }); }
+
+      // Catch-all POST — match against registered stubs
+      if (method === 'POST') {
+        let body: unknown = null;
+        try {
+          body = await req.json();
+        } catch {
+          body = null;
+        }
+
+        const headers: Record<string, string> = {};
+        req.headers.forEach((value, key) => {
+          headers[key.toLowerCase()] = value;
+        });
+
+        const incomingReq = restToCanonical(pathname, url.search, method, body, headers);
+
+        const stub = findMatch(incomingReq, 'rest');
+        if (!stub) {
+          return jsonResponse({ error: 'no_matching_stub', url: incomingReq.url, method }, 503);
+        }
+
+        const { response } = stub;
+        if (response.delay_ms && response.delay_ms > 0) {
+          await new Promise((resolve) => setTimeout(resolve, response.delay_ms));
+        }
+
+        const wire = restToWire(stub);
+        return new Response(wire.body, {
+          status: wire.status,
+          headers: wire.headers,
+        });
+      }
+
+      return jsonResponse({ error: 'not_found' }, 404);
+    },
+  });
+}
+
 if (import.meta.main) {
-const server = Bun.serve({
-  port: PORT,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const { pathname } = url;
-    const { method } = req;
-
-    // GET /health
-    if (method === 'GET' && pathname === '/health') {
-      return jsonResponse({ status: 'ok' }, 200);
-    }
-
-    // POST /mock — register a stub
-    if (method === 'POST' && pathname === '/mock') {
-      const input = (await req.json()) as StubInput;
-      const stub = registerStub(input);
-      return jsonResponse({ id: stub.id }, 201);
-    }
-
-    // DELETE /mock — clear all stubs
-    if (method === 'DELETE' && pathname === '/mock') {
-      clearStubs();
-      return new Response(null, { status: 204 });
-    }
-
-    // Catch-all POST — match against registered stubs
-    if (method === 'POST') {
-      let body: unknown = null;
-      try {
-        body = await req.json();
-      } catch {
-        body = null;
-      }
-
-      const headers: Record<string, string> = {};
-      req.headers.forEach((value, key) => {
-        headers[key.toLowerCase()] = value;
-      });
-
-      const incomingReq = restToCanonical(pathname, url.search, method, body, headers);
-
-      const stub = findMatch(incomingReq, 'rest');
-      if (!stub) {
-        return jsonResponse({ error: 'no_matching_stub', url: incomingReq.url, method }, 503);
-      }
-
-      const { response } = stub;
-      if (response.delay_ms && response.delay_ms > 0) {
-        await new Promise((resolve) => setTimeout(resolve, response.delay_ms));
-      }
-
-      const wire = restToWire(stub);
-      return new Response(wire.body, {
-        status: wire.status,
-        headers: wire.headers,
-      });
-    }
-
-    return jsonResponse({ error: 'not_found' }, 404);
-  },
-});
-
-console.log(`api-mock-server listening on port ${server.port}`);
+  const server = startControlServer(PORT);
+  console.log(`api-mock-server listening on port ${server.port}`);
 }
