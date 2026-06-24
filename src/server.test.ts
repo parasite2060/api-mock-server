@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { clearStubs, registerStub } from './store';
+import { clearStubs, registerStub } from './core/store';
 
 const BASE_URL = 'http://localhost:11436';
 const PORT = 11436;
@@ -42,7 +42,7 @@ beforeEach(() => {
       }
 
       if (method === 'POST') {
-        const { findMatch } = await import('./store');
+        const { findMatch } = await import('./core/store');
         let body: unknown = null;
         try {
           body = await req.json();

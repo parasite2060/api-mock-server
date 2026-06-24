@@ -1,4 +1,4 @@
-import { clearStubs, findMatch, registerStub, type StubInput } from './store';
+import { clearStubs, findMatch, registerStub, type StubInput } from './core/store';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
 
