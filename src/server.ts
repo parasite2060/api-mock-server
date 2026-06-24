@@ -1,4 +1,5 @@
 import { clearStubs, findMatch, registerStub, type StubInput } from './core/store';
+import { restToCanonical, restToWire } from './transports/rest';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
 
@@ -48,14 +49,9 @@ const server = Bun.serve({
         headers[key.toLowerCase()] = value;
       });
 
-      const incomingReq = {
-        url: pathname + url.search,
-        method,
-        body,
-        headers,
-      };
+      const incomingReq = restToCanonical(pathname, url.search, method, body, headers);
 
-      const stub = findMatch(incomingReq);
+      const stub = findMatch(incomingReq, 'rest');
       if (!stub) {
         return jsonResponse({ error: 'no_matching_stub', url: incomingReq.url, method }, 503);
       }
@@ -65,12 +61,10 @@ const server = Bun.serve({
         await new Promise((resolve) => setTimeout(resolve, response.delay_ms));
       }
 
-      return new Response(JSON.stringify(response.body), {
-        status: response.status,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(response.headers ?? {}),
-        },
+      const wire = restToWire(stub);
+      return new Response(wire.body, {
+        status: wire.status,
+        headers: wire.headers,
       });
     }
 
