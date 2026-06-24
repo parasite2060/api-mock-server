@@ -8,6 +8,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "graphql": "^17.0.1",
     "jsonpath-plus": "^10.2.0",
     "micromatch": "^4.0.8"
   },
