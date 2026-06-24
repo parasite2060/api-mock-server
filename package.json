@@ -8,6 +8,8 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
     "graphql": "^17.0.1",
     "jsonpath-plus": "^10.2.0",
     "micromatch": "^4.0.8"
