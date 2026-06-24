@@ -217,10 +217,12 @@ export function startControlServer(port: number) {
 }
 
 if (import.meta.main) {
+  const graphqlPort = Number(process.env['GRAPHQL_PORT'] ?? 11437);
+  const grpcPort = Number(process.env['GRPC_PORT'] ?? 11438);
   const control = startControlServer(PORT);
-  startGraphQLServer(Number(process.env['GRAPHQL_PORT'] ?? 11437));
-  startGrpcServer(Number(process.env['GRPC_PORT'] ?? 11438))
-    .then(() => console.log('grpc listening on 11438'))
+  startGraphQLServer(graphqlPort);
+  startGrpcServer(grpcPort)
+    .then(() => console.log(`grpc listening on ${grpcPort}`))
     .catch((e) => console.error('grpc failed to start', e));
-  console.log(`api-mock-server control+rest on ${control.port}, graphql on 11437, grpc on 11438`);
+  console.log(`api-mock-server control+rest on ${control.port}, graphql on ${graphqlPort}, grpc on ${grpcPort}`);
 }

@@ -122,9 +122,10 @@ In addition to the standard matchers, use `__graphql.*` JSONPath fields to match
 
 | JSONPath field | Description |
 |---|---|
-| `__graphql.operationName` | The `operationName` string from the request body |
 | `__graphql.operationType` | `query`, `mutation`, or `subscription` |
-| `__graphql.fields` | Comma-separated list of top-level selection-set field names |
+| `__graphql.operationName` | The operation name string (or `null` if anonymous) |
+| `__graphql.rootFields` | Array of **top-level** field names only (e.g. `["user"]` for `query { user { id name } }`) |
+| `__graphql.fields` | Array of **all** flattened dot-joined selection paths (e.g. `["user", "user.id", "user.name"]` — includes nested fields) |
 
 ### Response envelope
 
@@ -211,9 +212,14 @@ The `response.status` field in your stub is mapped to a gRPC status code:
 | HTTP status | gRPC code | Code number |
 |---|---|---|
 | `200` | `OK` | 0 |
-| `404` | `NOT_FOUND` | 5 |
 | `400` | `INVALID_ARGUMENT` | 3 |
+| `401` | `UNAUTHENTICATED` | 16 |
+| `403` | `PERMISSION_DENIED` | 7 |
+| `404` | `NOT_FOUND` | 5 |
+| `409` | `ABORTED` | 6 |
+| `429` | `RESOURCE_EXHAUSTED` | 8 |
 | `500` | `INTERNAL` | 13 |
+| `503` | `UNAVAILABLE` | 14 |
 | any other | `UNKNOWN` | 2 |
 
 ### Limitations
@@ -268,7 +274,7 @@ curl -X POST http://localhost:11435/mock \
 bun test
 ```
 
-22 unit tests covering all matcher types and stub lifecycle behaviour.
+52 unit tests covering REST matcher types, stub lifecycle, GraphQL transport, gRPC transport, and control-plane endpoints.
 
 ## Docker
 
