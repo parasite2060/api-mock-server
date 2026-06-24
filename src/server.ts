@@ -1,4 +1,10 @@
-import { clearStubs, findMatch, registerStub, type StubInput } from './store';
+import * as grpc from '@grpc/grpc-js';
+import { clearStubs, findMatch, registerStub, type StubInput } from './core/store';
+import { addProto, clearProtos, listMethods, listServices } from './control/proto-registry';
+import { setSchema, clearSchema, getSchema } from './control/schema-registry';
+import { restToCanonical, restToWire } from './transports/rest';
+import { graphqlToCanonical, graphqlToWire, validateQuery, type GraphQLBody } from './transports/graphql';
+import { grpcResponseObject, grpcToCanonical, statusToGrpc } from './transports/grpc';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
 
@@ -9,73 +15,263 @@ function jsonResponse(body: unknown, status: number, extraHeaders?: Record<strin
   });
 }
 
-const server = Bun.serve({
-  port: PORT,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const { pathname } = url;
-    const { method } = req;
-
-    // GET /health
-    if (method === 'GET' && pathname === '/health') {
-      return jsonResponse({ status: 'ok' }, 200);
-    }
-
-    // POST /mock — register a stub
-    if (method === 'POST' && pathname === '/mock') {
-      const input = (await req.json()) as StubInput;
-      const stub = registerStub(input);
-      return jsonResponse({ id: stub.id }, 201);
-    }
-
-    // DELETE /mock — clear all stubs
-    if (method === 'DELETE' && pathname === '/mock') {
-      clearStubs();
-      return new Response(null, { status: 204 });
-    }
-
-    // Catch-all POST — match against registered stubs
-    if (method === 'POST') {
-      let body: unknown = null;
+export function startGraphQLServer(port: number) {
+  return Bun.serve({
+    port,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (req.method !== 'POST' || url.pathname !== '/graphql') {
+        return new Response(JSON.stringify({ errors: [{ message: 'not_found' }] }), {
+          status: 404, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      let body: GraphQLBody;
       try {
-        body = await req.json();
+        body = (await req.json()) as GraphQLBody;
       } catch {
-        body = null;
+        return new Response(JSON.stringify({ errors: [{ message: 'invalid_json' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
       }
-
+      const validationErrors = validateQuery(body.query);
+      if (validationErrors) {
+        return new Response(JSON.stringify({ errors: validationErrors }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
       const headers: Record<string, string> = {};
-      req.headers.forEach((value, key) => {
-        headers[key.toLowerCase()] = value;
-      });
-
-      const incomingReq = {
-        url: pathname + url.search,
-        method,
-        body,
-        headers,
-      };
-
-      const stub = findMatch(incomingReq);
+      req.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
+      let stub;
+      try {
+        stub = findMatch(graphqlToCanonical(body, headers), 'graphql');
+      } catch {
+        return new Response(JSON.stringify({ errors: [{ message: 'invalid_query' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
       if (!stub) {
-        return jsonResponse({ error: 'no_matching_stub', url: incomingReq.url, method }, 503);
+        return new Response(JSON.stringify({ errors: [{ message: 'no_matching_stub' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
       }
-
-      const { response } = stub;
-      if (response.delay_ms && response.delay_ms > 0) {
-        await new Promise((resolve) => setTimeout(resolve, response.delay_ms));
+      if (stub.response.delay_ms && stub.response.delay_ms > 0) {
+        await new Promise((r) => setTimeout(r, stub.response.delay_ms));
       }
+      const wire = graphqlToWire(stub);
+      return new Response(wire.body, { status: wire.status, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+}
 
-      return new Response(JSON.stringify(response.body), {
-        status: response.status,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(response.headers ?? {}),
-        },
-      });
+function makeUnaryHandler(service: string, method: string, streaming: boolean) {
+  return (call: grpc.ServerUnaryCall<object, object>, cb: grpc.sendUnaryData<object>): void => {
+    if (streaming) {
+      cb({ code: grpc.status.UNIMPLEMENTED, message: 'unary only' });
+      return;
     }
+    const metadata: Record<string, string> = {};
+    for (const [k, v] of Object.entries(call.metadata.getMap())) metadata[k] = String(v);
+    const req = grpcToCanonical(service, method, call.request, metadata);
+    const stub = findMatch(req, 'grpc');
+    if (!stub) {
+      cb({ code: grpc.status.UNIMPLEMENTED, message: 'no_matching_stub' });
+      return;
+    }
+    const grpcCode = statusToGrpc(stub.response.status);
+    if (grpcCode !== grpc.status.OK) {
+      cb({ code: grpcCode, message: JSON.stringify(stub.response.body) });
+      return;
+    }
+    try {
+      cb(null, grpcResponseObject(stub));
+    } catch (e) {
+      cb({ code: grpc.status.INTERNAL, message: (e as Error).message });
+    }
+  };
+}
 
-    return jsonResponse({ error: 'not_found' }, 404);
-  },
-});
+function buildServiceDefinitions(): {
+  definition: grpc.ServiceDefinition;
+  implementation: grpc.UntypedServiceImplementation;
+}[] {
+  const out: { definition: grpc.ServiceDefinition; implementation: grpc.UntypedServiceImplementation }[] = [];
+  for (const service of listServices()) {
+    const definition: Record<string, grpc.MethodDefinition<object, object>> = {};
+    const implementation: grpc.UntypedServiceImplementation = {};
+    for (const { name, def } of listMethods(service)) {
+      definition[name] = {
+        path: `/${service}/${name}`,
+        requestStream: def.requestStream,
+        responseStream: def.responseStream,
+        requestSerialize: (value: object) => def.requestSerialize(value),
+        requestDeserialize: (bytes: Buffer) => def.requestDeserialize(bytes),
+        responseSerialize: (value: object) => def.responseSerialize(value),
+        responseDeserialize: (bytes: Buffer) => def.responseDeserialize(bytes),
+      };
+      implementation[name] = makeUnaryHandler(service, name, def.requestStream || def.responseStream);
+    }
+    out.push({ definition, implementation });
+  }
+  return out;
+}
 
-console.log(`api-mock-server listening on port ${server.port}`);
+interface GrpcHolder {
+  server: grpc.Server | null;
+  port: number | null;
+}
+
+const grpcHolder: GrpcHolder = { server: null, port: null };
+
+function buildAndBind(port: number): Promise<grpc.Server> {
+  const server = new grpc.Server();
+  for (const { definition, implementation } of buildServiceDefinitions()) {
+    server.addService(definition, implementation);
+  }
+  return new Promise((resolve, reject) => {
+    server.bindAsync(`0.0.0.0:${port}`, grpc.ServerCredentials.createInsecure(), (err) => {
+      if (err) return reject(err);
+      resolve(server);
+    });
+  });
+}
+
+export async function startGrpcServer(port: number): Promise<grpc.Server> {
+  const server = await buildAndBind(port);
+  grpcHolder.server = server;
+  grpcHolder.port = port;
+  return server;
+}
+
+async function shutdownGrpcServer(server: grpc.Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    server.tryShutdown((err) => {
+      if (err) server.forceShutdown();
+      done();
+    });
+  });
+}
+
+// @grpc/grpc-js forbids addService after a server has started, so rebinding the
+// running set of services means standing up a fresh server on the same port.
+// The previous instance must finish shutting down before re-binding or the new
+// bindAsync fails with EADDRINUSE.
+export async function rebindGrpcServices(): Promise<void> {
+  const { server, port } = grpcHolder;
+  if (!server || port == null) return;
+  await shutdownGrpcServer(server);
+  grpcHolder.server = await buildAndBind(port);
+}
+
+export function startControlServer(port: number) {
+  return Bun.serve({
+    port,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const { pathname } = url;
+      const { method } = req;
+
+      // GET /health
+      if (method === 'GET' && pathname === '/health') {
+        return jsonResponse({ status: 'ok', protos: listServices(), schema: getSchema() != null }, 200);
+      }
+
+      // POST /mock — register a stub
+      if (method === 'POST' && pathname === '/mock') {
+        const input = (await req.json()) as StubInput;
+        const stub = registerStub(input);
+        return jsonResponse({ id: stub.id }, 201);
+      }
+
+      // DELETE /mock — clear all stubs
+      if (method === 'DELETE' && pathname === '/mock') {
+        clearStubs();
+        return new Response(null, { status: 204 });
+      }
+
+      // POST /proto — upload a proto definition
+      if (method === 'POST' && pathname === '/proto') {
+        const { name, content } = (await req.json()) as { name: string; content: string };
+        try { addProto(name, content); } catch (e) {
+          return jsonResponse({ error: 'invalid_proto', detail: (e as Error).message }, 400);
+        }
+        try { await rebindGrpcServices(); } catch (e) {
+          return jsonResponse({ error: 'grpc_rebind_failed', detail: (e as Error).message }, 500);
+        }
+        return jsonResponse({ ok: true }, 201);
+      }
+
+      // DELETE /proto — clear all protos
+      if (method === 'DELETE' && pathname === '/proto') {
+        clearProtos();
+        try { await rebindGrpcServices(); } catch (e) {
+          return jsonResponse({ error: 'grpc_rebind_failed', detail: (e as Error).message }, 500);
+        }
+        return new Response(null, { status: 204 });
+      }
+
+      // POST /schema — upload a GraphQL schema
+      if (method === 'POST' && pathname === '/schema') {
+        const { sdl } = (await req.json()) as { sdl: string };
+        try { setSchema(sdl); } catch (e) {
+          return jsonResponse({ error: 'invalid_schema', detail: (e as Error).message }, 400);
+        }
+        return jsonResponse({ ok: true }, 201);
+      }
+
+      // DELETE /schema — clear the GraphQL schema
+      if (method === 'DELETE' && pathname === '/schema') { clearSchema(); return new Response(null, { status: 204 }); }
+
+      // Catch-all POST — match against registered stubs
+      if (method === 'POST') {
+        let body: unknown = null;
+        try {
+          body = await req.json();
+        } catch {
+          body = null;
+        }
+
+        const headers: Record<string, string> = {};
+        req.headers.forEach((value, key) => {
+          headers[key.toLowerCase()] = value;
+        });
+
+        const incomingReq = restToCanonical(pathname, url.search, method, body, headers);
+
+        const stub = findMatch(incomingReq, 'rest');
+        if (!stub) {
+          return jsonResponse({ error: 'no_matching_stub', url: incomingReq.url, method }, 503);
+        }
+
+        const { response } = stub;
+        if (response.delay_ms && response.delay_ms > 0) {
+          await new Promise((resolve) => setTimeout(resolve, response.delay_ms));
+        }
+
+        const wire = restToWire(stub);
+        return new Response(wire.body, {
+          status: wire.status,
+          headers: wire.headers,
+        });
+      }
+
+      return jsonResponse({ error: 'not_found' }, 404);
+    },
+  });
+}
+
+if (import.meta.main) {
+  const graphqlPort = Number(process.env['GRAPHQL_PORT'] ?? 11437);
+  const grpcPort = Number(process.env['GRPC_PORT'] ?? 11438);
+  const control = startControlServer(PORT);
+  startGraphQLServer(graphqlPort);
+  startGrpcServer(grpcPort)
+    .then(() => console.log(`grpc listening on ${grpcPort}`))
+    .catch((e) => console.error('grpc failed to start', e));
+  console.log(`api-mock-server control+rest on ${control.port}, graphql on ${graphqlPort}, grpc on ${grpcPort}`);
+}
