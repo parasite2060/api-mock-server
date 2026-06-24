@@ -129,9 +129,9 @@ In addition to the standard matchers, use `__graphql.*` JSONPath fields to match
 
 ### Response envelope
 
-- If the stub body contains a `data` key, the response is returned as `{ "data": ... }`.
-- If the stub body contains an `errors` key, the response is returned as `{ "errors": [...] }`.
-- Non-2xx stub `status` values are honoured in the HTTP response; the body is still wrapped in `{ "errors": [...] }`.
+- If the stub body already contains a `data` or `errors` key, it is returned **as-is** (assumed to be a complete GraphQL envelope).
+- Otherwise the stub body is **auto-wrapped** as `{ "data": <body> }`. This is the common case — you can stub just the payload and let the server add the envelope.
+- The HTTP status defaults to `200`; set `response.status` to override it (GraphQL conventionally returns `200` even for errors).
 
 ### Schema validation
 
@@ -197,6 +197,12 @@ curl -X POST http://localhost:11435/proto \
 
 Delete all protos with `DELETE /proto`.
 
+### Runtime rebinding (no restart required)
+
+The gRPC server **rebinds its services every time the proto registry changes**. You can start the server with no protos loaded, then `POST /proto` at any time — the newly-uploaded services become callable immediately, without restarting the process. `DELETE /proto` likewise unbinds them. (Internally the gRPC listener is torn down and re-bound on the same port; `@grpc/grpc-js` does not support adding services to an already-started server.)
+
+This means the typical flow is: **boot the server → upload protos → register stubs → call** — all at runtime.
+
 ### gRPC-specific matching
 
 Match against the decoded request message body using JSONPath matchers, and match the gRPC method path via the `url` field:
@@ -230,7 +236,7 @@ The `response.status` field in your stub is mapped to a gRPC status code:
 
 ### Bun HTTP/2 caveat
 
-gRPC relies on HTTP/2. Due to [oven-sh/bun#21759](https://github.com/oven-sh/bun/issues/21759), Bun does not yet expose a native HTTP/2 server API. The gRPC listener is implemented via `@grpc/grpc-js` which opens its own TCP socket (port 11438) independently of Bun's HTTP server. This works correctly for direct in-process gRPC clients (verified) but may behave differently depending on the client library and environment.
+gRPC relies on HTTP/2. The gRPC listener is implemented via `@grpc/grpc-js`, which opens its own TCP socket (port 11438) independently of Bun's HTTP server. Real `@grpc/grpc-js` client round-trips have been **verified working on Bun 1.3.14**. Note the known issue [oven-sh/bun#21759](https://github.com/oven-sh/bun/issues/21759): Bun's HTTP/2 server can emit empty DATA frames / missing trailers, which strict proxies (e.g. Envoy) may reject. This does not affect direct in-process clients hitting the mock, but if you front the mock with such a proxy, expect issues.
 
 ### Copy-paste `.proto` upload + gRPC stub example
 
@@ -275,7 +281,7 @@ curl -X POST http://localhost:11435/mock \
 bun test
 ```
 
-52 unit tests covering REST matcher types, stub lifecycle, GraphQL transport, gRPC transport, and control-plane endpoints.
+53 tests covering REST matcher types, stub lifecycle, GraphQL transport, gRPC transport (including runtime proto rebind), and control-plane endpoints.
 
 ## Docker
 
