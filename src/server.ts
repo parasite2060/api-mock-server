@@ -1,5 +1,6 @@
 import { clearStubs, findMatch, registerStub, type StubInput } from './core/store';
 import { restToCanonical, restToWire } from './transports/rest';
+import { graphqlToCanonical, graphqlToWire, validateQuery, type GraphQLBody } from './transports/graphql';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
 
@@ -10,6 +11,41 @@ function jsonResponse(body: unknown, status: number, extraHeaders?: Record<strin
   });
 }
 
+export function startGraphQLServer(port: number) {
+  return Bun.serve({
+    port,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (req.method !== 'POST' || url.pathname !== '/graphql') {
+        return new Response(JSON.stringify({ errors: [{ message: 'not_found' }] }), {
+          status: 404, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const body = (await req.json()) as GraphQLBody;
+      const validationErrors = validateQuery(body.query);
+      if (validationErrors) {
+        return new Response(JSON.stringify({ errors: validationErrors }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const headers: Record<string, string> = {};
+      req.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
+      const stub = findMatch(graphqlToCanonical(body, headers), 'graphql');
+      if (!stub) {
+        return new Response(JSON.stringify({ errors: [{ message: 'no_matching_stub' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (stub.response.delay_ms && stub.response.delay_ms > 0) {
+        await new Promise((r) => setTimeout(r, stub.response.delay_ms));
+      }
+      const wire = graphqlToWire(stub);
+      return new Response(wire.body, { status: wire.status, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+}
+
+if (import.meta.main) {
 const server = Bun.serve({
   port: PORT,
   async fetch(req) {
@@ -73,3 +109,4 @@ const server = Bun.serve({
 });
 
 console.log(`api-mock-server listening on port ${server.port}`);
+}
