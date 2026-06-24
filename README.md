@@ -159,8 +159,9 @@ Delete with `DELETE /schema`. When a schema is loaded, invalid queries are rejec
 curl -X POST http://localhost:11435/mock \
   -H 'Content-Type: application/json' \
   -d '{
+    "transport": "graphql",
     "matchers": [
-      { "field": "__graphql.operationName", "op": "exact", "value": "GetUser" }
+      { "field": "body", "op": "json_path", "path": "$.__graphql.operationName", "match": "exact", "value": "GetUser" }
     ],
     "response": {
       "status": 200,

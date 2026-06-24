@@ -115,7 +115,14 @@ function buildServiceDefinitions(): {
   return out;
 }
 
-export function startGrpcServer(port: number): Promise<grpc.Server> {
+interface GrpcHolder {
+  server: grpc.Server | null;
+  port: number | null;
+}
+
+const grpcHolder: GrpcHolder = { server: null, port: null };
+
+function buildAndBind(port: number): Promise<grpc.Server> {
   const server = new grpc.Server();
   for (const { definition, implementation } of buildServiceDefinitions()) {
     server.addService(definition, implementation);
@@ -126,6 +133,39 @@ export function startGrpcServer(port: number): Promise<grpc.Server> {
       resolve(server);
     });
   });
+}
+
+export async function startGrpcServer(port: number): Promise<grpc.Server> {
+  const server = await buildAndBind(port);
+  grpcHolder.server = server;
+  grpcHolder.port = port;
+  return server;
+}
+
+async function shutdownGrpcServer(server: grpc.Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    server.tryShutdown((err) => {
+      if (err) server.forceShutdown();
+      done();
+    });
+  });
+}
+
+// @grpc/grpc-js forbids addService after a server has started, so rebinding the
+// running set of services means standing up a fresh server on the same port.
+// The previous instance must finish shutting down before re-binding or the new
+// bindAsync fails with EADDRINUSE.
+export async function rebindGrpcServices(): Promise<void> {
+  const { server, port } = grpcHolder;
+  if (!server || port == null) return;
+  await shutdownGrpcServer(server);
+  grpcHolder.server = await buildAndBind(port);
 }
 
 export function startControlServer(port: number) {
@@ -160,11 +200,20 @@ export function startControlServer(port: number) {
         try { addProto(name, content); } catch (e) {
           return jsonResponse({ error: 'invalid_proto', detail: (e as Error).message }, 400);
         }
+        try { await rebindGrpcServices(); } catch (e) {
+          return jsonResponse({ error: 'grpc_rebind_failed', detail: (e as Error).message }, 500);
+        }
         return jsonResponse({ ok: true }, 201);
       }
 
       // DELETE /proto — clear all protos
-      if (method === 'DELETE' && pathname === '/proto') { clearProtos(); return new Response(null, { status: 204 }); }
+      if (method === 'DELETE' && pathname === '/proto') {
+        clearProtos();
+        try { await rebindGrpcServices(); } catch (e) {
+          return jsonResponse({ error: 'grpc_rebind_failed', detail: (e as Error).message }, 500);
+        }
+        return new Response(null, { status: 204 });
+      }
 
       // POST /schema — upload a GraphQL schema
       if (method === 'POST' && pathname === '/schema') {
