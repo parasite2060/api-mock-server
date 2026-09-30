@@ -153,6 +153,27 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
     expect(all.map((m: any) => m.fromMock).sort()).toEqual([false, true]);
   }, TIMEOUT);
 
+  it('an application that copies the mock reply\'s headers onto its own message still triggers a policy', async () => {
+    const req = uniq('prop.req'), mid = uniq('prop.mid'), next = uniq('prop.next'), done = uniq('prop.done');
+    await post('/kafka/topics', { topics: [mid] }); // the mock also consumes its own reply
+    await post('/kafka/policies', { id: 'first', when: { topic: req }, then: [{ topic: mid, value: { step: 1 } }] });
+    await post('/kafka/policies', { id: 'second', when: { topic: next }, then: [{ topic: done, value: { step: 2 } }] });
+    const seen = consumeOne(mid);
+    await seen.ready;
+    await app.send({ topic: req, messages: [{ value: '{}' }] });
+    const reply = await seen.message;
+    expect(reply.headers['x-api-mock-origin']).toBe('api-mock-server');
+    expect(reply.headers['x-api-mock-message-id']).toMatch(/^[0-9a-f-]{36}$/);
+    // "Tracing middleware": the application forwards every incoming header onto the message it sends next.
+    await app.send({ topic: next, messages: [{ value: '{"step":1}', headers: reply.headers }] });
+
+    const [nextMsg] = (await getMessages(next, 1, 10000)).messages;
+    expect(nextMsg).toMatchObject({ fromMock: false, matchedPolicy: 'second', reactions: [{ topic: done, ok: true }] });
+    expect(nextMsg.headers['x-api-mock-origin']).toBe('api-mock-server');
+    const [midMsg] = (await getMessages(mid, 1, 10000)).messages;
+    expect(midMsg).toMatchObject({ fromMock: true, matchedPolicy: null });
+  }, TIMEOUT);
+
   it('publishes on demand', async () => {
     const t = uniq('inject');
     await post('/kafka/topics', { topics: [t] });

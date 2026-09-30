@@ -1,5 +1,7 @@
 export const MOCK_ORIGIN_HEADER = 'x-api-mock-origin';
 export const MOCK_ORIGIN_VALUE = 'api-mock-server';
+/** A fresh UUID on every message the mock publishes; see SentIds. */
+export const MOCK_MESSAGE_ID_HEADER = 'x-api-mock-message-id';
 
 export type ConditionOp = 'exact' | 'contains' | 'regex' | 'exists' | 'not_exists';
 

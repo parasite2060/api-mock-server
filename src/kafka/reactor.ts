@@ -1,6 +1,6 @@
 import { findPolicy } from './policy';
 import { renderReply } from './template';
-import { MOCK_ORIGIN_HEADER, MOCK_ORIGIN_VALUE } from './types';
+import { MOCK_MESSAGE_ID_HEADER, MOCK_ORIGIN_HEADER, MOCK_ORIGIN_VALUE } from './types';
 import type { ConsumedMessage, OutgoingMessage, Reaction, RecordedMessage } from './types';
 
 type RawHeaderValue = Buffer | string | undefined;
@@ -15,9 +15,17 @@ export interface RawKafkaMessage {
 
 export type Publish = (msg: OutgoingMessage) => Promise<unknown>;
 
+/** Returns true (once) if the bridge published the message with this id to this topic. */
+export type ClaimOwn = (messageId: string, topic: string) => boolean;
+
 const text = (v: Buffer | string): string => (typeof v === 'string' ? v : v.toString('utf8'));
 
-export function decodeMessage(topic: string, partition: number, raw: RawKafkaMessage): ConsumedMessage {
+/**
+ * A message is the mock's own (`fromMock`) only if it carries the origin header AND `claimOwn` recognises its message
+ * id on this topic. The origin header alone is not enough: applications that copy incoming headers onto the messages
+ * they send would otherwise have those messages ignored.
+ */
+export function decodeMessage(topic: string, partition: number, raw: RawKafkaMessage, claimOwn: ClaimOwn = () => false): ConsumedMessage {
   const headers: Record<string, string> = {};
   for (const [name, val] of Object.entries(raw.headers ?? {})) {
     const first: RawHeaderValue = Array.isArray(val) ? val[0] : val;
@@ -37,6 +45,9 @@ export function decodeMessage(topic: string, partition: number, raw: RawKafkaMes
     }
   }
 
+  const messageId = headers[MOCK_MESSAGE_ID_HEADER];
+  const fromMock = headers[MOCK_ORIGIN_HEADER] === MOCK_ORIGIN_VALUE && messageId !== undefined && claimOwn(messageId, topic);
+
   return {
     topic,
     partition,
@@ -46,7 +57,7 @@ export function decodeMessage(topic: string, partition: number, raw: RawKafkaMes
     value,
     headers,
     parseError,
-    fromMock: headers[MOCK_ORIGIN_HEADER] === MOCK_ORIGIN_VALUE,
+    fromMock,
   };
 }
 

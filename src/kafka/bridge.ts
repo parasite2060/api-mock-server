@@ -2,7 +2,8 @@ import { Kafka, logLevel, Partitioners, type Admin, type Consumer, type EachMess
 import { decodeMessage, react } from './reactor';
 import type { Recorder } from './recorder';
 import { SubscribeTimeoutError, type BridgeLike } from './routes';
-import { MOCK_ORIGIN_HEADER, MOCK_ORIGIN_VALUE, type OutgoingMessage } from './types';
+import { SentIds } from './sent-ids';
+import { MOCK_MESSAGE_ID_HEADER, MOCK_ORIGIN_HEADER, MOCK_ORIGIN_VALUE, type OutgoingMessage } from './types';
 
 export interface KafkaBridgeOptions {
   brokers: string[];
@@ -28,6 +29,8 @@ export class KafkaBridge implements BridgeLike {
   private readonly subscribed = new Set<string>();
   /** "topic:partition" → lowest offset still to be processed. Offsets below it are backlog or redelivery. */
   private readonly floor = new Map<string, bigint>();
+  /** Ids of messages this bridge published, so it recognises (only) its own messages when it consumes them. */
+  private readonly sentIds = new SentIds();
   private queue: Promise<void> = Promise.resolve();
   /** Settles once every earlier re-subscribe, including ones whose caller already timed out, has finished. */
   private settling: Promise<void> = Promise.resolve();
@@ -158,21 +161,31 @@ export class KafkaBridge implements BridgeLike {
       if (offset < (this.floor.get(key) ?? 0n)) return;
       // Advance before reacting so a redelivery (e.g. after a rebalance) is never handled twice.
       this.floor.set(key, offset + 1n);
-      this.recorder.record(await react(decodeMessage(topic, partition, message), (m) => this.publish(m)));
+      const msg = decodeMessage(topic, partition, message, (id, t) => this.sentIds.claim(id, t));
+      this.recorder.record(await react(msg, (m) => this.publish(m)));
     } catch (e) {
       console.error(`[kafka] failed to handle ${topic}[${partition}]@${message.offset}: ${errMessage(e)}`);
     }
   }
 
   async publish(msg: OutgoingMessage): Promise<{ topic: string; partition: number; offset: string }> {
-    const [md] = await this.producer.send({
-      topic: msg.topic,
-      messages: [{
-        key: msg.key,
-        value: JSON.stringify(msg.value),
-        headers: { ...msg.headers, [MOCK_ORIGIN_HEADER]: MOCK_ORIGIN_VALUE },
-      }],
-    });
+    const id = crypto.randomUUID();
+    // Remember before sending: the consumer can see the message before send() resolves.
+    this.sentIds.remember(id, msg.topic);
+    let md;
+    try {
+      [md] = await this.producer.send({
+        topic: msg.topic,
+        messages: [{
+          key: msg.key,
+          value: JSON.stringify(msg.value),
+          headers: { ...msg.headers, [MOCK_ORIGIN_HEADER]: MOCK_ORIGIN_VALUE, [MOCK_MESSAGE_ID_HEADER]: id },
+        }],
+      });
+    } catch (e) {
+      this.sentIds.forget(id);
+      throw e;
+    }
     if (!md) throw new Error(`no record metadata returned for topic ${msg.topic}`);
     return { topic: md.topicName, partition: md.partition, offset: md.baseOffset ?? md.offset ?? '' };
   }

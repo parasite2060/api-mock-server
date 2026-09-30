@@ -61,7 +61,7 @@ test ──GET    /kafka/messages ──▶ control ──▶ recorder (long-pol
 
 real broker ──message──▶ bridge consumer
    ├─ decode (key, JSON value, headers)
-   ├─ own message (x-api-mock-origin)? ──▶ record only
+   ├─ own message (origin header + message id it sent to this topic)? ──▶ record only
    ├─ findPolicy(topic, msg)                     (policy store)
    ├─ match ──▶ for each `then`: render templates ─ delay_ms ─▶ bridge.publish
    └─ record { …, matchedPolicy, reactions[] }
@@ -148,7 +148,7 @@ src/
 | `headers` | no | String map (values templatable) |
 | `delay_ms` | no | Wait before publishing this message; entries run in order |
 
-Every message the mock publishes (replies and `/kafka/publish`) gets the header `x-api-mock-origin: api-mock-server` added.
+Every message the mock publishes (replies and `/kafka/publish`) gets the headers `x-api-mock-origin: api-mock-server` and `x-api-mock-message-id: <crypto.randomUUID()>` added (overriding same-named headers).
 
 ### 4.4 Templating
 
@@ -207,7 +207,7 @@ All routes live on the existing control port `11435`. Only the six exact method 
 }
 ```
 
-`value` holds the raw string when `parseError` is `true`. `fromMock` is `true` for messages carrying `x-api-mock-origin` (recorded, never matched). `reactions[].error` carries the message when a publish fails. The recorder keeps the most recent **1000** messages (ring buffer). A message is recorded once its reactions have completed, so a long-poll that sees it also sees its reaction results.
+`value` holds the raw string when `parseError` is `true`. `fromMock` is `true` for the mock's own messages, as defined by loop protection in §6 (recorded, never matched). `reactions[].error` carries the message when a publish fails. The recorder keeps the most recent **1000** messages (ring buffer). A message is recorded once its reactions have completed, so a long-poll that sees it also sees its reaction results.
 
 ---
 
@@ -223,7 +223,7 @@ All routes live on the existing control port `11435`. Only the six exact method 
   Calls are serialised through a single promise chain so concurrent registrations cannot interleave re-subscribes.
 - **Message handling:** per message — decode key/headers to UTF-8 and value via `JSON.parse`; if `fromMock`, record and stop; otherwise find the policy, run each `then` entry (delay, render, publish), then record with `matchedPolicy` and `reactions`. Handler errors are caught and recorded; they never crash the consumer.
 - **Connection failure:** if the broker is unreachable at boot, the server still starts, `/health` reports `connected: false`, the Kafka routes return `503 kafka_unavailable`, and connection is retried every 5 s in the background.
-- **Loop protection:** replies to a subscribed topic are consumed back but flagged `fromMock` and never evaluated, so a policy cannot trigger itself.
+- **Loop protection:** the bridge remembers the id → topic of every message it publishes (bounded, insertion-ordered, 10000 entries, oldest evicted; the id is stored before `send` so the consumer can never see the message first). A consumed message is the mock's own (`fromMock`) only if it has `x-api-mock-origin: api-mock-server` **and** an `x-api-mock-message-id` remembered for that **same topic**; the id is then forgotten (claimed once). Own messages are recorded but never evaluated, so a policy cannot trigger itself. Everything else is an application message even if it carries the origin header, so applications whose middleware copies incoming headers onto outgoing messages still trigger policies.
 
 ---
 

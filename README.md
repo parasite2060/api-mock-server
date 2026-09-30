@@ -342,7 +342,12 @@ Lifecycle matches REST stubs: policies are evaluated in descending `priority`, t
 | `headers` | No | String map; values are templated |
 | `delay_ms` | No | Wait this long before publishing this message. Entries run in order |
 
-Every message the mock publishes (replies and `POST /kafka/publish`) carries the header `x-api-mock-origin: api-mock-server`. The mock records such messages but never matches them against policies, so a policy whose reply topic equals its trigger topic cannot trigger itself.
+Every message the mock publishes (replies and `POST /kafka/publish`) carries two extra headers, overriding any of the same name in the template or request:
+
+- `x-api-mock-origin: api-mock-server`
+- `x-api-mock-message-id: <random UUID>`, unique per message
+
+**Loop protection.** The mock remembers the id and topic of every message it publishes (the most recent 10000). When it consumes a message that has the origin header *and* an id it published *to that same topic*, the message is its own: it is recorded with `fromMock: true` but never matched against policies, so a policy whose reply topic equals its trigger topic cannot trigger itself. Each id is recognised only once. Anything else is an application message, even if it carries `x-api-mock-origin`: an application that copies incoming headers onto the messages it sends (tracing middleware, header propagation) still triggers policies with those messages.
 
 If a reply cannot be rendered or published (for example a non-string `key` in the template, or the broker rejects the send), the policy still matches and the failure is recorded as `{ "ok": false, "error": "..." }` in the message's `reactions`. It is not reported as an HTTP error.
 
@@ -371,7 +376,7 @@ All routes are on the control port (`11435`). Only these six exact method + path
 | `POST /kafka/policies` | policy (above) | `201 { "id" }` | Waits until the topic is subscribed and assigned before replying |
 | `DELETE /kafka/policies` | — | `204` | Clears policies; subscriptions are kept |
 | `POST /kafka/topics` | `{ "topics": ["a", "b"] }` | `201 { "topics": [...all subscribed] }` | Record-only subscription; waits for assignment |
-| `POST /kafka/publish` | `{ "topic", "key"?, "value", "headers"? }` | `201 { "topic", "partition", "offset" }` | Publishes as-is, no templating. `key` must be a string, `headers` an object. Like every mock-published message it carries `x-api-mock-origin`, so it is recorded but never triggers a policy |
+| `POST /kafka/publish` | `{ "topic", "key"?, "value", "headers"? }` | `201 { "topic", "partition", "offset" }` | Publishes as-is, no templating. `key` must be a string, `headers` an object. Like every mock-published message it carries `x-api-mock-origin` and `x-api-mock-message-id`, so when the mock consumes it, it is recorded (`fromMock: true`) but never triggers a policy |
 | `GET /kafka/messages` | `?topic=&min=&timeout_ms=` | `200 { "messages": [...] }` | Long-poll, see below |
 | `DELETE /kafka/messages` | — | `204` | Clears the recorder |
 | `GET /health` | — | `200` | Adds `kafka: { enabled, connected, topics, policies }` |
@@ -400,7 +405,7 @@ All routes are on the control port (`11435`). Only these six exact method + path
 
 - `matchedPolicy` is `null` when no policy matched (or the message is `fromMock`).
 - When the value is not valid JSON, `parseError` is `true` and `value` holds the raw string.
-- `fromMock` is `true` for messages carrying `x-api-mock-origin`.
+- `fromMock` is `true` for the mock's own messages, recognised by `x-api-mock-origin` plus a `x-api-mock-message-id` it published to that topic (see loop protection above).
 - `reactions[].error` carries the failure message when `ok` is `false`.
 - Header names are lower-cased.
 - A message is recorded after its reactions have completed, so a long-poll that sees it also sees its reaction results.

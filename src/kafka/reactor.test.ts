@@ -48,9 +48,25 @@ describe('kafka reactor', () => {
     expect(m.parseError).toBe(true);
     expect(m.value).toBe('not json');
   });
-  it('flags messages published by the mock', () => {
-    const m = decodeMessage('t', 0, { key: null, value: buf('{}'), headers: { 'x-api-mock-origin': buf('api-mock-server') }, offset: '0', timestamp: '0' });
-    expect(m.fromMock).toBe(true);
+  it('flags a message as the mock\'s own only when it has the origin header and its id is claimed on this topic', () => {
+    const own = { 'x-api-mock-origin': buf('api-mock-server'), 'x-api-mock-message-id': buf('id-1') };
+    const raw = (headers: Record<string, Buffer>) => ({ key: null, value: buf('{}'), headers, offset: '0', timestamp: '0' });
+    const claims: string[] = [];
+    const claim = (id: string, topic: string) => { claims.push(`${topic}/${id}`); return id === 'id-1' && topic === 't'; };
+
+    expect(decodeMessage('t', 0, raw(own), claim).fromMock).toBe(true);
+    expect(claims).toEqual(['t/id-1']);
+    // Same headers copied onto another topic (e.g. by tracing middleware): an application message.
+    expect(decodeMessage('other', 0, raw(own), claim).fromMock).toBe(false);
+    // Origin header without a message id, or with an id the bridge never sent.
+    expect(decodeMessage('t', 0, raw({ 'x-api-mock-origin': buf('api-mock-server') }), claim).fromMock).toBe(false);
+    expect(decodeMessage('t', 0, raw({ 'x-api-mock-origin': buf('api-mock-server'), 'x-api-mock-message-id': buf('id-2') }), claim).fromMock).toBe(false);
+    // A message id without the origin header is never claimed.
+    claims.length = 0;
+    expect(decodeMessage('t', 0, raw({ 'x-api-mock-message-id': buf('id-1') }), claim).fromMock).toBe(false);
+    expect(claims).toEqual([]);
+    // Without a claim function nothing is the mock's own.
+    expect(decodeMessage('t', 0, raw(own)).fromMock).toBe(false);
   });
   it('publishes rendered replies in order and records them', async () => {
     registerPolicy({ id: 'p', when: { topic: 'orders' }, then: [
