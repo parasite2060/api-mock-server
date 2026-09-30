@@ -157,7 +157,8 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
 
   it('an application that copies the mock reply\'s headers onto its own message still triggers a policy', async () => {
     const req = uniq('prop.req'), mid = uniq('prop.mid'), next = uniq('prop.next'), done = uniq('prop.done');
-    await post('/kafka/topics', { topics: [mid] }); // the mock also consumes its own reply
+    // One subscribe (one rebalance) for every topic; the mock also consumes its own reply on `mid`.
+    expect((await post('/kafka/topics', { topics: [req, mid, next] })).status).toBe(201);
     await post('/kafka/policies', { id: 'first', when: { topic: req }, then: [{ topic: mid, value: { step: 1 } }] });
     await post('/kafka/policies', { id: 'second', when: { topic: next }, then: [{ topic: done, value: { step: 2 } }] });
     const seen = consumeOne(mid);
@@ -196,7 +197,7 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
 
   it('delayed replies to concurrent messages run in parallel and do not stall the consumer', async () => {
     const t = uniq('delay'), r = uniq('delay.reply'), other = uniq('delay.other');
-    await post('/kafka/topics', { topics: [r, other] });
+    expect((await post('/kafka/topics', { topics: [t, r, other] })).status).toBe(201);
     await post('/kafka/policies', { id: 'slow', when: { topic: t }, then: [{ topic: r, value: { n: '{{value.n}}' }, delay_ms: 3000 }], times: -1 });
     const t0 = Date.now();
     await app.send({ topic: t, messages: [{ value: '{"n":1}' }, { value: '{"n":2}' }, { value: '{"n":3}' }] });
