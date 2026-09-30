@@ -274,7 +274,7 @@ curl -X POST http://localhost:11435/mock \
 
 The mock can act as a Kafka consumer and producer on a **real broker**: register a *policy* that says "when the application publishes a message like this to topic X, publish these reply messages", and every message the mock consumes is recorded so tests can assert on it. Policies are expressed in Kafka terms (topic, key, value, headers), not as REST stubs. Values are JSON; connections are plaintext only.
 
-Kafka is optional. It is enabled only when `KAFKA_BROKERS` (comma-separated `host:port` list) is set; without it the server behaves exactly as before and `/kafka/*` returns `503 kafka_disabled`.
+Kafka is optional. It is enabled only when `KAFKA_BROKERS` (comma-separated `host:port` list) is set; without it the server behaves exactly as before and the Kafka control routes return `503 kafka_disabled`.
 
 ```bash
 KAFKA_BROKERS=localhost:9092 bun run start
@@ -364,7 +364,7 @@ If a reply cannot be rendered or published (for example a non-string `key` in th
 
 ### Endpoints
 
-All routes are on the control port (`11435`).
+All routes are on the control port (`11435`). Only these six exact method + path pairs are reserved for Kafka; any other request under `/kafka/` (for example a REST stub for Confluent's `POST /kafka/v3/clusters/{cluster}/topics/{topic}/records`) goes to the REST stubs as before, whether Kafka is enabled or not.
 
 | Endpoint | Body / query | Success | Notes |
 |---|---|---|---|
@@ -409,14 +409,14 @@ All routes are on the control port (`11435`).
 
 | Situation | Response |
 |---|---|
-| `KAFKA_BROKERS` not set (any `/kafka/*` route, including `DELETE`) | `503 { "error": "kafka_disabled" }` |
+| `KAFKA_BROKERS` not set (any of the six Kafka routes, including `DELETE`) | `503 { "error": "kafka_disabled" }` |
 | Broker unreachable / bridge not connected (or a subscribe fails for a reason other than the timeout, then with a `detail`) | `503 { "error": "kafka_unavailable" }` |
 | Body is not valid JSON | `400 { "error": "invalid_json" }` |
 | Invalid policy (missing `when.topic`, `then` not an array, `then[]` missing `topic` / `value`, bad `on` / `op`, invalid regex, `times` not `-1` or `>= 1`, non-string `value` / `path` / `name`, ...) | `400 { "error": "invalid_policy", "detail": "..." }` |
 | Invalid `topics` / publish body | `400 { "error": "invalid_request", "detail": "..." }` |
 | Topic not assigned to the consumer within 30 s | `504 { "error": "subscribe_timeout", "topics": [...] }` |
 | `POST /kafka/publish` send fails | `502 { "error": "publish_failed", "detail": "..." }` |
-| Unknown `/kafka/*` route | `404 { "error": "not_found" }` |
+| Any other `/kafka/*` method + path | Not a Kafka route: handled like any other request (REST stub match, `503 no_matching_stub`, or `404 not_found` for non-`POST`) |
 | No policy matches a consumed message | Recorded with `matchedPolicy: null` |
 | Consumed value is not JSON | Recorded with `parseError: true` and the raw string as `value` |
 | Reply fails to render or publish | Recorded in `reactions[]` with `ok: false, error` |

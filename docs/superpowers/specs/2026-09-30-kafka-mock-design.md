@@ -77,9 +77,9 @@ src/
     template.ts       # render {{…}} placeholders against a consumed message
     recorder.ts       # bounded ring buffer + long-poll waiters
     bridge.ts         # kafkajs client/producer/consumer; subscribe, publish, message handler
-    routes.ts         # control-plane handlers for /kafka/*
+    routes.ts         # control-plane handlers for the six /kafka/* routes
   core/matcher.ts     # export matchString + a jsonPath helper for reuse (logic unchanged)
-  server.ts           # delegate /kafka/* to routes; start bridge when KAFKA_BROKERS is set; /health adds kafka
+  server.ts           # delegate the Kafka routes to routes.ts; start bridge when KAFKA_BROKERS is set; /health adds kafka
 ```
 
 `policy.ts`, `template.ts` and `recorder.ts` are pure (no I/O) and unit-tested in isolation. `bridge.ts` is the only file importing `kafkajs`. The REST stub store (`core/store.ts`) and the `/mock` endpoint are untouched.
@@ -177,7 +177,7 @@ Same semantics as REST stubs: policies are sorted by descending `priority` (stab
 
 ## 5. Control API
 
-All routes live on the existing control port `11435`.
+All routes live on the existing control port `11435`. Only the six exact method + path pairs below (`/health` aside) are reserved; any other request under `/kafka/` is not a Kafka route and falls through to the existing REST stub handling unchanged, with or without Kafka (so REST stubs for paths such as Confluent's `POST /kafka/v3/clusters/{cluster}/topics/{topic}/records` keep working).
 
 | Endpoint | Body / query | Success | Notes |
 |---|---|---|---|
@@ -222,7 +222,7 @@ All routes live on the existing control port `11435`.
   4. waits for the consumer `GROUP_JOIN` event whose assignment includes every requested topic (timeout 30s → `504 subscribe_timeout`).
   Calls are serialised through a single promise chain so concurrent registrations cannot interleave re-subscribes.
 - **Message handling:** per message — decode key/headers to UTF-8 and value via `JSON.parse`; if `fromMock`, record and stop; otherwise find the policy, run each `then` entry (delay, render, publish), then record with `matchedPolicy` and `reactions`. Handler errors are caught and recorded; they never crash the consumer.
-- **Connection failure:** if the broker is unreachable at boot, the server still starts, `/health` reports `connected: false`, `/kafka/*` returns `503 kafka_unavailable`, and connection is retried every 5 s in the background.
+- **Connection failure:** if the broker is unreachable at boot, the server still starts, `/health` reports `connected: false`, the Kafka routes return `503 kafka_unavailable`, and connection is retried every 5 s in the background.
 - **Loop protection:** replies to a subscribed topic are consumed back but flagged `fromMock` and never evaluated, so a policy cannot trigger itself.
 
 ---
@@ -231,8 +231,9 @@ All routes live on the existing control port `11435`.
 
 | Situation | Response / behaviour |
 |---|---|
-| `KAFKA_BROKERS` unset | `/kafka/*` → `503 { error: "kafka_disabled" }`; rest of server unchanged |
-| Broker unreachable | `/kafka/*` → `503 { error: "kafka_unavailable" }`; background reconnect |
+| `KAFKA_BROKERS` unset | the six Kafka routes → `503 { error: "kafka_disabled" }`; rest of server unchanged |
+| Broker unreachable | the six Kafka routes → `503 { error: "kafka_unavailable" }`; background reconnect |
+| Other `/kafka/*` method + path | not a Kafka route: REST stub handling as for any other path |
 | Invalid JSON body | `400 { error: "invalid_json" }` |
 | Invalid policy (missing `when.topic`, `then` not an array, `then[]` missing `topic`/`value`, bad `on`/`op`, invalid regex) | `400 { error: "invalid_policy", detail }` |
 | Invalid topics / publish body | `400 { error: "invalid_request", detail }` |
@@ -247,7 +248,7 @@ All routes live on the existing control port `11435`.
 ## 8. Testing
 
 - **Unit (no broker):** `policy.test.ts` (validation, each condition type/op, priority/times lifecycle, parse-error behaviour), `template.test.ts` (type-preserving whole placeholders, embedded interpolation, headers/key/metadata, missing paths), `recorder.test.ts` (ring-buffer cap, topic filter, long-poll resolve and timeout).
-- **Control plane without broker:** `/kafka/*` returns `kafka_disabled` when the bridge is not configured; `/health` reports `kafka.enabled: false`.
+- **Control plane without broker:** the Kafka routes return `kafka_disabled` when the bridge is not configured, other `/kafka/*` paths reach REST stubs; `/health` reports `kafka.enabled: false`.
 - **Integration (real broker):** `server.kafka.test.ts` runs when `KAFKA_TEST_BROKERS` is set:
   - policy reacts to an application message and the reply appears on the reply topic with templated key/value/headers;
   - first message after `POST /kafka/policies` returns is not missed;

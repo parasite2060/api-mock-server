@@ -2,12 +2,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { startControlServer } from './server';
 import { kafkaState, parseMessagesQuery, SubscribeTimeoutError, type BridgeLike } from './kafka/routes';
 import { clearPolicies, listPolicies } from './kafka/policy';
+import { clearStubs, registerStub } from './core/store';
 
 const PORT = 11475;
 const base = `http://localhost:${PORT}`;
 let srv: ReturnType<typeof startControlServer>;
 
 function reset() {
+  clearStubs();
   kafkaState.bridge = null;
   kafkaState.recorder.clear();
   clearPolicies();
@@ -114,11 +116,43 @@ describe('kafka control routes without a broker', () => {
     expect(listPolicies()).toEqual([]);
     expect((await fetch(`${base}/kafka/messages`, { method: 'DELETE' })).status).toBe(204);
   });
-  it('returns 404 not_found for unknown kafka routes', async () => {
-    kafkaState.bridge = fakeBridge();
-    const res = await fetch(`${base}/kafka/nope`);
-    expect(res.status).toBe(404);
-    expect(((await res.json()) as any).error).toBe('not_found');
+  it('leaves every other /kafka/* path to REST stubs, with Kafka disabled or enabled', async () => {
+    const confluent = '/kafka/v3/clusters/c1/topics/t/records';
+    registerStub({
+      matchers: [{ field: 'url', op: 'exact', value: confluent }, { field: 'method', value: 'POST' }],
+      response: { status: 200, body: { error_code: 200, offset: 7 } },
+      times: -1,
+      transport: 'rest',
+    });
+    registerStub({
+      matchers: [{ field: 'url', op: 'exact', value: '/kafka/anything' }],
+      response: { status: 202, body: { unscoped: true } },
+      times: -1,
+    });
+    for (const bridge of [null, fakeBridge()]) {
+      kafkaState.bridge = bridge;
+      const res = await post(confluent, { records: [{ value: 1 }] });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ error_code: 200, offset: 7 });
+      const unscoped = await post('/kafka/anything', {});
+      expect(unscoped.status).toBe(202);
+      expect(await unscoped.json()).toEqual({ unscoped: true });
+    }
+  });
+  it('does not reserve unknown /kafka/* paths or other methods on the known ones', async () => {
+    for (const bridge of [null, fakeBridge()]) {
+      kafkaState.bridge = bridge;
+      const unmatched = await post('/kafka/nope', {});
+      expect(unmatched.status).toBe(503);
+      expect(((await unmatched.json()) as any).error).toBe('no_matching_stub');
+      for (const [method, path] of [['GET', '/kafka/nope'], ['GET', '/kafka/policies'], ['PUT', '/kafka/topics'], ['GET', '/kafka/publish']]) {
+        const res = await fetch(`${base}${path}`, { method });
+        expect(res.status).toBe(404);
+        expect(((await res.json()) as any).error).toBe('not_found');
+      }
+      const wrongMethodPost = await post('/kafka/messages', {});
+      expect(((await wrongMethodPost.json()) as any).error).toBe('no_matching_stub');
+    }
   });
   it('messages query params are defaulted and clamped', async () => {
     kafkaState.bridge = fakeBridge();

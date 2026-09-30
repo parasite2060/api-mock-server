@@ -80,15 +80,24 @@ async function subscribe(bridge: BridgeLike, topics: string[]): Promise<Response
   }
 }
 
+/** The only method + path pairs the Kafka control plane owns; any other /kafka/* request is left to the REST stubs. */
+const KAFKA_ROUTES = new Set([
+  'POST /kafka/policies',
+  'DELETE /kafka/policies',
+  'POST /kafka/topics',
+  'POST /kafka/publish',
+  'GET /kafka/messages',
+  'DELETE /kafka/messages',
+]);
+
 export async function handleKafkaRoute(req: Request, url: URL): Promise<Response | null> {
-  if (!url.pathname.startsWith('/kafka/')) return null;
+  const { method } = req;
+  const { pathname } = url;
+  if (!KAFKA_ROUTES.has(`${method} ${pathname}`)) return null;
 
   const bridge = kafkaState.bridge;
   if (!bridge) return json({ error: 'kafka_disabled' }, 503);
   if (!bridge.connected) return json({ error: 'kafka_unavailable' }, 503);
-
-  const { method } = req;
-  const { pathname } = url;
 
   if (pathname === '/kafka/policies' && method === 'POST') {
     const parsed = await readJson(req);
@@ -148,5 +157,5 @@ export async function handleKafkaRoute(req: Request, url: URL): Promise<Response
     return new Response(null, { status: 204 });
   }
 
-  return json({ error: 'not_found' }, 404);
+  return null;
 }
