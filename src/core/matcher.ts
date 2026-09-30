@@ -20,17 +20,17 @@ export function matchString(actual: string, op: string | undefined, value: strin
   }
 }
 
+function _evalJsonPathRaw(json: unknown, path: string): unknown {
+  const normalizedPath = path.replace(/\[(-\d+)\]/g, '[$1:]');
+  return JSONPath({ path: normalizedPath, json, wrap: false });
+}
+
 export function evalJsonPath(json: unknown, path: string): unknown {
-  // Only proceed if json is an object or array
-  if (json == null || (typeof json !== 'object')) {
+  if (json == null || typeof json !== 'object') {
     return undefined;
   }
-
   try {
-    // Normalize [-N] → [-N:] for jsonpath-plus compatibility (it doesn't support bare negative indices)
-    const normalizedPath = path.replace(/\[(-\d+)\]/g, '[$1:]');
-    const result = JSONPath({ path: normalizedPath, json, wrap: false });
-    return result;
+    return _evalJsonPathRaw(json, path);
   } catch {
     return undefined;
   }
@@ -52,7 +52,7 @@ export function matchesOne(matcher: MatcherDef, req: IncomingRequest): boolean {
 
     case 'body': {
       if (matcher.op === 'json_path') {
-        const result = evalJsonPath(req.body, matcher.path ?? '$');
+        const result = _evalJsonPathRaw(req.body, matcher.path ?? '$');
         if (matcher.match === 'exists') return result != null;
         if (matcher.match === 'not_exists') return result == null;
         // When path returns an array (e.g. slice notation), use first element

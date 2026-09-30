@@ -17,4 +17,7 @@ describe('matcher helpers', () => {
     expect(evalJsonPath(null, '$.x')).toBeUndefined();
     expect(evalJsonPath('str', '$.x')).toBeUndefined();
   });
+  it('evalJsonPath on invalid JSONPath returns undefined', () => {
+    expect(evalJsonPath({ a: 1 }, '$.[(invalid)]')).toBeUndefined();
+  });
 });
