@@ -4,6 +4,7 @@ import { addProto, clearProtos, listMethods, listServices } from './control/prot
 import { setSchema, clearSchema, getSchema } from './control/schema-registry';
 import { restToCanonical, restToWire } from './transports/rest';
 import { graphqlToCanonical, graphqlToWire, validateQuery, type GraphQLBody } from './transports/graphql';
+import { handleKafkaRoute, kafkaHealth } from './kafka/routes';
 import { grpcResponseObject, grpcToCanonical, statusToGrpc } from './transports/grpc';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
@@ -176,9 +177,12 @@ export function startControlServer(port: number) {
       const { pathname } = url;
       const { method } = req;
 
+      const kafkaRes = await handleKafkaRoute(req, url);
+      if (kafkaRes) return kafkaRes;
+
       // GET /health
       if (method === 'GET' && pathname === '/health') {
-        return jsonResponse({ status: 'ok', protos: listServices(), schema: getSchema() != null }, 200);
+        return jsonResponse({ status: 'ok', protos: listServices(), schema: getSchema() != null, kafka: kafkaHealth() }, 200);
       }
 
       // POST /mock — register a stub
