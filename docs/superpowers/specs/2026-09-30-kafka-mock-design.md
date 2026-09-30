@@ -214,10 +214,10 @@ All routes live on the existing control port `11435`.
 ## 6. Kafka bridge behaviour
 
 - **Enabling:** the bridge starts only when `KAFKA_BROKERS` (comma-separated) is set. `KAFKA_CLIENT_ID` defaults to `api-mock-server`. Plaintext connections only.
-- **Consumer group:** `api-mock-server-<random>` per process, `fromBeginning: false`, so the mock never shares partitions with the application's own consumer groups and ignores backlog from earlier runs.
+- **Consumer group:** `api-mock-server-<random>` per process, so the mock never shares partitions with the application's own consumer groups. Backlog from earlier runs is ignored by capturing each new topic's per-partition high-water mark *before* subscribing and skipping offsets below it (subscribing with `fromBeginning: true`). This avoids the race where `fromBeginning: false` resolves "latest" only after the group join and could skip a message sent right after `201`.
 - **Subscribing a topic:** `ensureSubscribed(topics)`:
   1. returns immediately if all topics are already subscribed;
-  2. creates any missing topic with `admin.createTopics` (broker defaults);
+  2. creates any missing topic with `admin.createTopics` (broker defaults) and records its high-water marks;
   3. `consumer.stop()`, `subscribe` to the full set, `consumer.run()`;
   4. waits for the consumer `GROUP_JOIN` event whose assignment includes every requested topic (timeout 30s → `504 subscribe_timeout`).
   Calls are serialised through a single promise chain so concurrent registrations cannot interleave re-subscribes.
