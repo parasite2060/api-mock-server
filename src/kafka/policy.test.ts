@@ -33,6 +33,29 @@ describe('kafka policy', () => {
     expect(validatePolicy({ when: { topic: 't' }, then: [{ value: 1 }] })).toContain('topic');
     expect(validatePolicy({ when: { topic: 't' }, then: [{ topic: 'r' }] })).toContain('value');
   });
+  it('rejects non-string condition fields, including a non-string regex value', () => {
+    const v = (c: unknown) => validatePolicy({ when: { topic: 't', match: [c] } });
+    expect(v({ on: 'key', op: 'regex', value: ['('] })).toContain('when.match[0].value');
+    expect(v({ on: 'key', op: 'exact', value: 5 })).toContain('when.match[0].value');
+    expect(v({ on: 'value', path: 5, op: 'exists' })).toContain('when.match[0].path');
+    expect(v({ on: 'header', name: 5, op: 'exists' })).toContain('when.match[0].name');
+  });
+  it('requires times to be -1 or >= 1 and priority any integer', () => {
+    const t = (times: number) => validatePolicy({ when: { topic: 't' }, times });
+    expect(t(0)).toContain('times');
+    expect(t(-2)).toContain('times');
+    expect(t(1.5)).toContain('times');
+    expect(t(-1)).toBeNull();
+    expect(t(3)).toBeNull();
+    expect(validatePolicy({ when: { topic: 't' }, priority: -7 })).toBeNull();
+    expect(validatePolicy({ when: { topic: 't' }, priority: 1.5 })).toContain('priority');
+  });
+  it('header lookup ignores prototype keys', () => {
+    expect(matchesConditions([{ on: 'header', name: 'constructor', op: 'exists' }], msg())).toBe(false);
+    expect(matchesConditions([{ on: 'header', name: 'constructor', op: 'not_exists' }], msg())).toBe(true);
+    expect(() => matchesConditions([{ on: 'header', name: 'constructor', op: 'contains', value: 'x' }], msg())).not.toThrow();
+    expect(matchesConditions([{ on: 'header', name: 'constructor', op: 'contains', value: 'x' }], msg())).toBe(false);
+  });
   it('accepts a minimal policy', () => {
     expect(validatePolicy({ when: { topic: 't' } })).toBeNull();
   });

@@ -24,12 +24,15 @@ function validateCondition(c: unknown, idx: number): string | null {
   if (c.op !== undefined && !CONDITION_OPS.includes(c.op as ConditionOp)) {
     return `${p}.op must be one of: ${CONDITION_OPS.join(', ')}`;
   }
+  for (const field of ['value', 'path', 'name']) {
+    if (c[field] !== undefined && typeof c[field] !== 'string') return `${p}.${field} must be a string`;
+  }
   if (c.on === 'header' && !isNonEmptyString(c.name)) {
     return `${p}.name is required for header conditions`;
   }
   if (c.op === 'regex') {
     try {
-      new RegExp(typeof c.value === 'string' ? c.value : '');
+      new RegExp((c.value as string | undefined) ?? '');
     } catch {
       return `${p}.value is not a valid regex`;
     }
@@ -64,9 +67,16 @@ export function validatePolicy(input: unknown): string | null {
       if (err) return err;
     }
   }
-  if (input.times !== undefined && !Number.isInteger(input.times)) return 'times must be an integer';
+  if (input.times !== undefined && !(Number.isInteger(input.times) && ((input.times as number) === -1 || (input.times as number) >= 1))) {
+    return 'times must be an integer that is -1 (unlimited) or >= 1';
+  }
   if (input.priority !== undefined && !Number.isInteger(input.priority)) return 'priority must be an integer';
   return null;
+}
+
+function headerValue(headers: Record<string, string>, name: string): string | undefined {
+  const key = name.toLowerCase();
+  return Object.hasOwn(headers, key) ? headers[key] : undefined;
 }
 
 function matchText(actual: string | null | undefined, c: Condition): boolean {
@@ -88,7 +98,7 @@ function matchesCondition(c: Condition, msg: ConsumedMessage): boolean {
     case 'key':
       return matchText(msg.key, c);
     case 'header':
-      return matchText(msg.headers[(c.name ?? '').toLowerCase()], c);
+      return matchText(headerValue(msg.headers, c.name ?? ''), c);
     default:
       return false;
   }
