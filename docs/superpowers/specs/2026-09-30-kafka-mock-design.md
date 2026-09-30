@@ -213,7 +213,7 @@ All routes live on the existing control port `11435`. Only the six exact method 
 
 ## 6. Kafka bridge behaviour
 
-- **Enabling:** the bridge starts only when `KAFKA_BROKERS` (comma-separated) is set. `KAFKA_CLIENT_ID` defaults to `api-mock-server`. Plaintext connections only.
+- **Enabling:** the bridge starts only when `KAFKA_BROKERS` (comma-separated) is set and names at least one broker after splitting, trimming and dropping empty entries; a value such as `,` logs a warning and leaves Kafka disabled. `KAFKA_CLIENT_ID` defaults to `api-mock-server`. Plaintext connections only.
 - **Consumer group:** `api-mock-server-<random>` per process, so the mock never shares partitions with the application's own consumer groups. Backlog from earlier runs is ignored by capturing each new topic's per-partition high-water mark *before* subscribing and skipping offsets below it (subscribing with `fromBeginning: true`). This avoids the race where `fromBeginning: false` resolves "latest" only after the group join and could skip a message sent right after `201`.
 - **Subscribing a topic:** `ensureSubscribed(topics)`:
   1. returns immediately if all topics are already subscribed;
@@ -232,7 +232,7 @@ All routes live on the existing control port `11435`. Only the six exact method 
 
 | Situation | Response / behaviour |
 |---|---|
-| `KAFKA_BROKERS` unset | the six Kafka routes → `503 { error: "kafka_disabled" }`; rest of server unchanged |
+| `KAFKA_BROKERS` unset (or naming no broker) | the six Kafka routes → `503 { error: "kafka_disabled" }`; rest of server unchanged |
 | Broker unreachable | the six Kafka routes → `503 { error: "kafka_unavailable" }`; background reconnect |
 | Other `/kafka/*` method + path | not a Kafka route: REST stub handling as for any other path |
 | Invalid JSON body | `400 { error: "invalid_json" }` |

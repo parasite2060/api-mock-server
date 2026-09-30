@@ -170,6 +170,11 @@ export async function rebindGrpcServices(): Promise<void> {
   grpcHolder.server = await buildAndBind(port);
 }
 
+/** Broker list from a comma-separated KAFKA_BROKERS value; empty when unset or when it names no broker (e.g. ","). */
+export function parseKafkaBrokers(raw: string | undefined): string[] {
+  return (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 export async function startKafka(brokers: string[], clientId = 'api-mock-server'): Promise<KafkaBridge> {
   const bridge = new KafkaBridge({ brokers, clientId, recorder: kafkaState.recorder });
   kafkaState.bridge = bridge;
@@ -292,8 +297,10 @@ if (import.meta.main) {
     .then(() => console.log(`grpc listening on ${grpcPort}`))
     .catch((e) => console.error('grpc failed to start', e));
   const kafkaBrokers = process.env['KAFKA_BROKERS'];
-  if (kafkaBrokers) {
-    const brokers = kafkaBrokers.split(',').map((s) => s.trim()).filter(Boolean);
+  const brokers = parseKafkaBrokers(kafkaBrokers);
+  if (kafkaBrokers && brokers.length === 0) {
+    console.warn(`KAFKA_BROKERS="${kafkaBrokers}" lists no brokers; Kafka stays disabled`);
+  } else if (brokers.length > 0) {
     startKafka(brokers, process.env['KAFKA_CLIENT_ID'] ?? 'api-mock-server')
       .catch((e) => console.error('kafka bridge failed to start', e));
     console.log(`kafka bridge -> ${brokers.join(',')}`);

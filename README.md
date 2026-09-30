@@ -586,6 +586,6 @@ it('light dream extracts a decision', async () => {
 | `PORT` | `11435` | Control + REST listener port |
 | `GRAPHQL_PORT` | `11437` | GraphQL listener port |
 | `GRPC_PORT` | `11438` | gRPC listener port |
-| `KAFKA_BROKERS` | *(unset)* | Comma-separated broker list, e.g. `kafka:9092`. Enables the Kafka bridge; unset = Kafka disabled |
+| `KAFKA_BROKERS` | *(unset)* | Comma-separated broker list, e.g. `kafka:9092`. Enables the Kafka bridge; unset = Kafka disabled. A value that names no broker (e.g. `,`) also leaves Kafka disabled, with a warning in the log |
 | `KAFKA_CLIENT_ID` | `api-mock-server` | Kafka client id used when `KAFKA_BROKERS` is set |
 | `KAFKA_TEST_BROKERS` | *(unset)* | Test-only: broker address that enables the Kafka integration tests in `bun test` |

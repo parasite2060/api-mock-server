@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
-import { startControlServer } from './server';
+import { parseKafkaBrokers, startControlServer } from './server';
 import { kafkaState, parseMessagesQuery, SubscribeTimeoutError, type BridgeLike } from './kafka/routes';
 import { clearPolicies, listPolicies } from './kafka/policy';
 import { clearStubs, registerStub } from './core/store';
@@ -178,4 +178,39 @@ describe('kafka control routes without a broker', () => {
     const res = await fetch(`${base}/kafka/messages?topic=a&min=1&timeout_ms=5000`);
     expect(((await res.json()) as any).messages.length).toBe(1);
   });
+});
+
+describe('KAFKA_BROKERS parsing', () => {
+  it('splits, trims and drops empty entries', () => {
+    expect(parseKafkaBrokers(undefined)).toEqual([]);
+    expect(parseKafkaBrokers('')).toEqual([]);
+    expect(parseKafkaBrokers(' , ,')).toEqual([]);
+    expect(parseKafkaBrokers(' kafka:9092 ,, other:9093 ')).toEqual(['kafka:9092', 'other:9093']);
+  });
+  it('a KAFKA_BROKERS with no brokers in it leaves Kafka disabled and logs a warning', async () => {
+    const port = 11477;
+    const proc = Bun.spawn(['bun', 'run', `${import.meta.dir}/server.ts`], {
+      env: { ...process.env, PORT: String(port), GRAPHQL_PORT: '11478', GRPC_PORT: '11479', KAFKA_BROKERS: ' , ' },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    try {
+      let health: any = null;
+      const deadline = Date.now() + 10000;
+      while (!health && Date.now() < deadline) {
+        health = await fetch(`http://localhost:${port}/health`).then((r) => r.json()).catch(() => null);
+        if (!health) await Bun.sleep(100);
+      }
+      expect(health?.kafka).toEqual({ enabled: false, connected: false, topics: [], policies: 0 });
+      const disabled = await fetch(`http://localhost:${port}/kafka/messages`);
+      expect(((await disabled.json()) as any).error).toBe('kafka_disabled');
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+    const output = (await new Response(proc.stdout).text()) + (await new Response(proc.stderr).text());
+    expect(output).toContain('KAFKA_BROKERS');
+    expect(output).toMatch(/no brokers/i);
+    expect(output).not.toContain('kafka bridge ->');
+  }, 20000);
 });
