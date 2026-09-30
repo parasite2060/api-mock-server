@@ -280,7 +280,7 @@ Kafka is optional. It is enabled only when `KAFKA_BROKERS` (comma-separated `hos
 KAFKA_BROKERS=localhost:9092 bun run start
 ```
 
-Topics are subscribed at runtime: registering a policy subscribes to its `when.topic`, and `POST /kafka/topics` subscribes to record-only topics. Missing topics are created with the broker's defaults. Messages already on a topic before it was subscribed are ignored.
+Topics are subscribed at runtime: registering a policy subscribes to its `when.topic`, and `POST /kafka/topics` subscribes to record-only topics. The mock consumes and records **only topics it is subscribed to** this way; in particular, its replies are recorded only if their topic is subscribed too (for example via `POST /kafka/topics`). Missing topics are created with the broker's defaults. Messages already on a topic before it was subscribed are ignored.
 
 ### Register a policy
 
@@ -450,16 +450,23 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
   api-mock:
     image: api-mock-server
-    depends_on: [kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
     environment:
       KAFKA_BROKERS: kafka:9092
     ports:
       - "11435:11435"
 ```
 
-Your application under test must also reach the broker as `kafka:9092`. To reach it from the host as well, add a second listener advertised as `localhost`; the single advertised listener above only works inside the compose network.
+The healthcheck is the same broker probe CI uses, so the mock (and anything else that `depends_on` the broker being healthy) starts only once the broker answers; the mock would otherwise retry every ~5 s until it does. Your application under test must also reach the broker as `kafka:9092`. To reach it from the host as well, add a second listener advertised as `localhost`; the single advertised listener above only works inside the compose network.
 
 ### Copy-paste request/reply example
 
@@ -515,13 +522,13 @@ curl -X DELETE http://localhost:11435/kafka/messages
 bun test
 ```
 
-Without any environment this runs 100 tests and skips 10: REST matcher types, stub lifecycle, GraphQL transport, gRPC transport (including runtime proto rebind), control-plane endpoints, and the Kafka policy, template, recorder and control-route unit tests. The skipped tests are the Kafka integration suite, which needs a real broker:
+This runs the REST matcher types, stub lifecycle, GraphQL transport, gRPC transport (including runtime proto rebind), control-plane endpoints, and the Kafka policy, template, recorder and control-route unit tests. The Kafka integration suite (`src/server.kafka.test.ts`) is skipped unless `KAFKA_TEST_BROKERS` points at a real broker:
 
 ```bash
 KAFKA_TEST_BROKERS=localhost:9092 bun test
 ```
 
-With `KAFKA_TEST_BROKERS` set the integration suite runs against that broker (108 tests, none skipped; it takes about a minute). CI starts an `apache/kafka:3.9.0` service container and sets this variable, so the integration tests run on every PR.
+With `KAFKA_TEST_BROKERS` set the integration suite runs against that broker as well (it takes about a minute). CI starts an `apache/kafka:3.9.0` service container and sets this variable, so the integration tests run on every PR.
 
 ## Docker
 
