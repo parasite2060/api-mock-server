@@ -29,10 +29,17 @@ export class KafkaBridge implements BridgeLike {
   /** "topic:partition" → lowest offset still to be processed. Offsets below it are backlog or redelivery. */
   private readonly floor = new Map<string, bigint>();
   private queue: Promise<void> = Promise.resolve();
+  /** Settles once every earlier re-subscribe, including ones whose caller already timed out, has finished. */
+  private settling: Promise<void> = Promise.resolve();
+  private abortInflight: ((e: Error) => void) | null = null;
 
   constructor(opts: KafkaBridgeOptions) {
     const kafka = new Kafka({ clientId: opts.clientId, brokers: opts.brokers, logLevel: logLevel.ERROR });
-    this.admin = kafka.admin();
+    // The admin connects first. It gets its own client with a short connect retry so an unreachable broker fails in
+    // well under a second and start() retries every ~reconnectMs (kafkajs's default connect retry takes ~10 s).
+    // Admin operations keep kafkajs's default 5 retries.
+    const adminKafka = new Kafka({ clientId: opts.clientId, brokers: opts.brokers, logLevel: logLevel.ERROR, retry: { retries: 1, initialRetryTime: 300 } });
+    this.admin = adminKafka.admin({ retry: { retries: 5 } });
     this.producer = kafka.producer({ createPartitioner: Partitioners.DefaultPartitioner });
     // consumer.stop() waits for the in-flight fetch; a short maxWaitTimeInMs (default 5000) keeps re-subscribes fast.
     this.consumer = kafka.consumer({ groupId: `api-mock-server-${crypto.randomUUID()}`, maxWaitTimeInMs: 500 });
@@ -84,6 +91,33 @@ export class KafkaBridge implements BridgeLike {
     if (missing.length === 0) return;
     if (!this.isConnected) throw new Error('kafka bridge is not connected');
 
+    // One deadline bounds the whole operation. The background work may outlive it (consumer.stop() waits for an
+    // in-flight handler, e.g. one sleeping on delay_ms), so the caller gets its rejection on time while the work
+    // finishes on its own; the next subscribe waits for it before touching the consumer.
+    let aborted = false;
+    let abort!: (e: Error) => void;
+    const abortion = new Promise<never>((_, reject) => {
+      abort = (e) => { aborted = true; reject(e); };
+    });
+    abortion.catch(() => {});
+    const timer = setTimeout(() => abort(new SubscribeTimeoutError(missing)), this.subscribeTimeoutMs);
+    this.abortInflight = abort;
+
+    const previous = this.settling;
+    const work = this.resubscribe(previous, missing, abortion, () => aborted);
+    this.settling = Promise.allSettled([previous, work]).then(() => {});
+    try {
+      await Promise.race([work, abortion]);
+    } finally {
+      clearTimeout(timer);
+      if (this.abortInflight === abort) this.abortInflight = null;
+    }
+    for (const t of missing) this.subscribed.add(t);
+  }
+
+  private async resubscribe(previous: Promise<void>, missing: string[], abortion: Promise<never>, isAborted: () => boolean): Promise<void> {
+    await Promise.race([previous, abortion]);
+
     // Only create topics that don't exist yet: kafkajs logs an ERROR for TOPIC_ALREADY_EXISTS even though it's harmless.
     const existing = new Set(await this.admin.listTopics());
     const toCreate = missing.filter((t) => !existing.has(t));
@@ -96,28 +130,25 @@ export class KafkaBridge implements BridgeLike {
         this.floor.set(`${topic}:${partition}`, BigInt(high));
       }
     }
+    // Past this point the consumer is stopped and must be restarted, so give up only before touching it.
+    if (isAborted()) return;
 
     const all = [...this.subscribed, ...missing];
     let removeListener: () => void = () => {};
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const joined = new Promise<void>((resolve, reject) => {
+    const joined = new Promise<void>((resolve) => {
       removeListener = this.consumer.on(this.consumer.events.GROUP_JOIN, (e) => {
         const assigned = e.payload.memberAssignment;
         if (all.every((t) => assigned[t] !== undefined)) resolve();
       });
-      timer = setTimeout(() => reject(new SubscribeTimeoutError(missing)), this.subscribeTimeoutMs);
     });
-
     try {
       await this.consumer.stop();
       await this.consumer.subscribe({ topics: all, fromBeginning: true });
       await this.consumer.run({ eachMessage: (p) => this.handle(p) });
-      await joined;
+      await Promise.race([joined, abortion]);
     } finally {
       removeListener();
-      clearTimeout(timer);
     }
-    for (const t of missing) this.subscribed.add(t);
   }
 
   private async handle({ topic, partition, message }: EachMessagePayload): Promise<void> {
@@ -151,6 +182,7 @@ export class KafkaBridge implements BridgeLike {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.isConnected = false;
+    this.abortInflight?.(new Error('kafka bridge stopped'));
     await this.disconnectAll();
   }
 

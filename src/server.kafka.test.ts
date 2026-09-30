@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
-import { Kafka, logLevel, type Admin, type Producer } from 'kafkajs';
+import { Kafka, logLevel, type Admin, type Consumer, type Producer } from 'kafkajs';
 import { startControlServer, startKafka, stopKafka } from './server';
-import { kafkaState } from './kafka/routes';
-import { clearPolicies } from './kafka/policy';
+import { kafkaState, SubscribeTimeoutError } from './kafka/routes';
+import { clearPolicies, listPolicies, registerPolicy } from './kafka/policy';
+import { KafkaBridge } from './kafka/bridge';
+import { Recorder } from './kafka/recorder';
 
 const brokers = process.env.KAFKA_TEST_BROKERS;
 const PORT = 11476;
@@ -28,6 +30,7 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
   let kafka: Kafka;
   let app: Producer;
   let admin: Admin;
+  const readers = new Set<Consumer>();
 
   async function createTopic(topic: string): Promise<void> {
     await admin.createTopics({ topics: [{ topic }], waitForLeaders: true });
@@ -38,6 +41,8 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
   // An independent consumer standing in for "someone reading the reply topic".
   function consumeOne(topic: string): { ready: Promise<void>; message: Promise<Seen> } {
     const consumer = kafka.consumer({ groupId: `test-reader-${crypto.randomUUID()}` });
+    readers.add(consumer);
+    const release = (): void => { readers.delete(consumer); consumer.disconnect().catch(() => {}); };
     let ready!: Promise<void>;
     const message = new Promise<Seen>((resolveMsg, rejectMsg) => {
       ready = (async () => {
@@ -56,12 +61,12 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
               if (v !== undefined) headers[k] = (Array.isArray(v) ? v[0] : v)!.toString();
             }
             resolveMsg({ key: m.key?.toString() ?? '', value: m.value?.toString() ?? '', headers });
-            setTimeout(() => { consumer.disconnect().catch(() => {}); }, 0);
+            setTimeout(release, 0);
           },
         });
         await joined;
       })();
-      ready.catch(rejectMsg);
+      ready.catch((e) => { release(); rejectMsg(e); });
     });
     return { ready, message };
   }
@@ -87,6 +92,7 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
 
   afterAll(async () => {
     await stopKafka();
+    await Promise.all([...readers].map((c) => c.disconnect().catch(() => {})));
     await Promise.all([app?.disconnect().catch(() => {}), admin?.disconnect().catch(() => {})]);
     srv?.stop(true);
     kafkaState.recorder.clear();
@@ -164,4 +170,37 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
     const health = (await (await fetch(`${base}/health`)).json()) as any;
     expect(health.kafka.topics).toEqual(expect.arrayContaining([a, b]));
   }, TIMEOUT);
+
+  it('a subscribe that outlasts its timeout rejects on time while a handler sleeps, and the queue keeps working', async () => {
+    const recorder = new Recorder();
+    const slow = new KafkaBridge({ brokers: brokers!.split(','), clientId: 'timeout-test', recorder, subscribeTimeoutMs: 8000 });
+    try {
+      await slow.start();
+      const a = uniq('slow'), b = uniq('slow-b');
+      await slow.ensureSubscribed([a]);
+      const reply = uniq('slow.reply');
+      await createTopic(reply);
+      registerPolicy({ id: 'slow', when: { topic: a }, then: [{ topic: reply, value: {}, delay_ms: 14000 }] });
+      await app.send({ topic: a, messages: [{ value: '{}' }] });
+      // times:1 policies are removed when they match, so once it is gone the handler is sleeping on delay_ms.
+      while (listPolicies().some((p) => p.id === 'slow')) await Bun.sleep(50);
+
+      // consumer.stop() inside this subscribe blocks on the sleeping handler; the caller must still get its timeout on time.
+      const t0 = Date.now();
+      const err = await slow.ensureSubscribed([b]).then(() => null, (e: unknown) => e);
+      const elapsed = Date.now() - t0;
+      expect(err).toBeInstanceOf(SubscribeTimeoutError);
+      expect((err as SubscribeTimeoutError).topics).toEqual([b]);
+      expect(elapsed).toBeGreaterThanOrEqual(7900);
+      expect(elapsed).toBeLessThan(9000);
+      expect(slow.topics).toEqual([a]);
+
+      // Once the handler finishes, the serialised queue still subscribes new topics.
+      expect((await recorder.waitFor(a, 1, 15000)).length).toBe(1);
+      await slow.ensureSubscribed([b]);
+      expect(slow.topics).toEqual([a, b]);
+    } finally {
+      await slow.stop();
+    }
+  }, 60000);
 });
