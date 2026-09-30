@@ -340,7 +340,7 @@ Lifecycle matches REST stubs: policies are evaluated in descending `priority`, t
 | `key` | No | Message key, a string (templated). Omitted = no key |
 | `value` | Yes | Any JSON, serialised with `JSON.stringify` after templating |
 | `headers` | No | String map; values are templated |
-| `delay_ms` | No | Wait this long before publishing this message. Entries run in order |
+| `delay_ms` | No | Wait this long before publishing this message. Entries of one policy run in order; the wait does not hold up other messages (see below) |
 
 Every message the mock publishes (replies and `POST /kafka/publish`) carries two extra headers, overriding any of the same name in the template or request:
 
@@ -348,6 +348,8 @@ Every message the mock publishes (replies and `POST /kafka/publish`) carries two
 - `x-api-mock-message-id: <random UUID>`, unique per message
 
 **Loop protection.** The mock remembers the id and topic of every message it publishes (the most recent 10000). When it consumes a message that has the origin header *and* an id it published *to that same topic*, the message is its own: it is recorded with `fromMock: true` but never matched against policies, so a policy whose reply topic equals its trigger topic cannot trigger itself. Each id is recognised only once. Anything else is an application message, even if it carries `x-api-mock-origin`: an application that copies incoming headers onto the messages it sends (tracing middleware, header propagation) still triggers policies with those messages.
+
+Reactions run in the background: the mock keeps consuming while a reply waits on `delay_ms`, so three messages that each trigger a 3 s delayed reply get their replies after about 3 s, not 9 s, and other topics keep being recorded meanwhile. Policies are still chosen in the order messages arrive (so `times` counts in message order).
 
 If a reply cannot be rendered or published (for example a non-string `key` in the template, or the broker rejects the send), the policy still matches and the failure is recorded as `{ "ok": false, "error": "..." }` in the message's `reactions`. It is not reported as an HTTP error.
 
@@ -381,7 +383,7 @@ All routes are on the control port (`11435`). Only these six exact method + path
 | `DELETE /kafka/messages` | — | `204` | Clears the recorder |
 | `GET /health` | — | `200` | Adds `kafka: { enabled, connected, topics, policies }` |
 
-`GET /kafka/messages` returns as soon as at least `min` messages (default `0`) for `topic` (default: all topics) are recorded, or after `timeout_ms` (default `0`, max `30000`) with whatever exists. Messages come back in the order they were recorded, so `?topic=payment.completed&min=1&timeout_ms=10000` is the way to wait for a reply without sleeping. The recorder keeps the most recent 1000 messages.
+`GET /kafka/messages` returns as soon as at least `min` messages (default `0`) for `topic` (default: all topics) are recorded, or after `timeout_ms` (default `0`, max `30000`) with whatever exists. Messages come back in the order they were recorded (a message is recorded once its reactions finish, so one with a delayed reply can come after later messages; sort by `partition`/`offset` if you need log order), so `?topic=payment.completed&min=1&timeout_ms=10000` is the way to wait for a reply without sleeping. The recorder keeps the most recent 1000 messages.
 
 **Register policies before triggering the application.** `POST /kafka/policies` and `POST /kafka/topics` return only once the mock's consumer has been assigned the topic. On a fresh subscribe this typically takes a few seconds because the broker rebalances the consumer group; it returns `504 subscribe_timeout` after 30 s. Once it has returned, the next message on that topic is not missed. Registering another policy on an already-subscribed topic returns immediately, so in a test suite subscribe once (for example in a `beforeAll`) and use `DELETE /kafka/policies` + `DELETE /kafka/messages` between tests.
 

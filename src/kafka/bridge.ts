@@ -15,6 +15,9 @@ export interface KafkaBridgeOptions {
 
 const errMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/** How long stop() waits for in-flight reactions (e.g. ones sleeping on delay_ms) before disconnecting. */
+const STOP_GRACE_MS = 2000;
+
 export class KafkaBridge implements BridgeLike {
   private readonly admin: Admin;
   private readonly producer: Producer;
@@ -31,6 +34,8 @@ export class KafkaBridge implements BridgeLike {
   private readonly floor = new Map<string, bigint>();
   /** Ids of messages this bridge published, so it recognises (only) its own messages when it consumes them. */
   private readonly sentIds = new SentIds();
+  /** Reactions still running (delay, render, publish, record). The consumer does not wait for them. */
+  private readonly inflight = new Set<Promise<void>>();
   private queue: Promise<void> = Promise.resolve();
   /** Settles once every earlier re-subscribe, including ones whose caller already timed out, has finished. */
   private settling: Promise<void> = Promise.resolve();
@@ -83,19 +88,20 @@ export class KafkaBridge implements BridgeLike {
     }
   }
 
-  ensureSubscribed(topics: string[]): Promise<void> {
-    const run = this.queue.then(() => this.subscribe(topics));
+  /** `timeoutMs` overrides the bridge's `subscribeTimeoutMs` for this call. */
+  ensureSubscribed(topics: string[], timeoutMs = this.subscribeTimeoutMs): Promise<void> {
+    const run = this.queue.then(() => this.subscribe(topics, timeoutMs));
     this.queue = run.catch(() => {});
     return run;
   }
 
-  private async subscribe(topics: string[]): Promise<void> {
+  private async subscribe(topics: string[], timeoutMs: number): Promise<void> {
     const missing = [...new Set(topics)].filter((t) => !this.subscribed.has(t));
     if (missing.length === 0) return;
     if (!this.isConnected) throw new Error('kafka bridge is not connected');
 
-    // One deadline bounds the whole operation. The background work may outlive it (consumer.stop() waits for an
-    // in-flight handler, e.g. one sleeping on delay_ms), so the caller gets its rejection on time while the work
+    // One deadline bounds the whole operation. The background work may outlive it (topic creation, consumer.stop()
+    // waiting for an in-flight fetch, a slow group join), so the caller gets its rejection on time while the work
     // finishes on its own; the next subscribe waits for it before touching the consumer.
     let aborted = false;
     let abort!: (e: Error) => void;
@@ -103,7 +109,7 @@ export class KafkaBridge implements BridgeLike {
       abort = (e) => { aborted = true; reject(e); };
     });
     abortion.catch(() => {});
-    const timer = setTimeout(() => abort(new SubscribeTimeoutError(missing)), this.subscribeTimeoutMs);
+    const timer = setTimeout(() => abort(new SubscribeTimeoutError(missing)), timeoutMs);
     this.abortInflight = abort;
 
     const previous = this.settling;
@@ -155,6 +161,7 @@ export class KafkaBridge implements BridgeLike {
   }
 
   private async handle({ topic, partition, message }: EachMessagePayload): Promise<void> {
+    const where = `${topic}[${partition}]@${message.offset}`;
     try {
       const key = `${topic}:${partition}`;
       const offset = BigInt(message.offset);
@@ -162,9 +169,16 @@ export class KafkaBridge implements BridgeLike {
       // Advance before reacting so a redelivery (e.g. after a rebalance) is never handled twice.
       this.floor.set(key, offset + 1n);
       const msg = decodeMessage(topic, partition, message, (id, t) => this.sentIds.claim(id, t));
-      this.recorder.record(await react(msg, (m) => this.publish(m)));
+      // Not awaited: a reply's delay_ms must not hold up the next message, recording on other topics, or a
+      // re-subscribe. react() picks the policy synchronously, so policies still fire in message order; the message
+      // is recorded once its own reactions have finished.
+      const reaction = react(msg, (m) => this.publish(m))
+        .then((recorded) => this.recorder.record(recorded))
+        .catch((e) => console.error(`[kafka] failed to handle ${where}: ${errMessage(e)}`));
+      this.inflight.add(reaction);
+      void reaction.finally(() => this.inflight.delete(reaction));
     } catch (e) {
-      console.error(`[kafka] failed to handle ${topic}[${partition}]@${message.offset}: ${errMessage(e)}`);
+      console.error(`[kafka] failed to handle ${where}: ${errMessage(e)}`);
     }
   }
 
@@ -196,6 +210,14 @@ export class KafkaBridge implements BridgeLike {
     this.reconnectTimer = null;
     this.isConnected = false;
     this.abortInflight?.(new Error('kafka bridge stopped'));
+    // Give running reactions a moment to publish; ones still sleeping on a longer delay_ms fail to publish once the
+    // producer is gone, which is recorded as ok:false in their reactions and logged.
+    if (this.inflight.size > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const grace = new Promise<void>((resolve) => { timer = setTimeout(resolve, STOP_GRACE_MS); });
+      await Promise.race([Promise.allSettled([...this.inflight]), grace]);
+      clearTimeout(timer);
+    }
     await this.disconnectAll();
   }
 

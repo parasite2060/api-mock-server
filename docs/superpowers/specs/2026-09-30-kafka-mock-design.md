@@ -146,7 +146,7 @@ src/
 | `key` | no | Message key (templatable); omitted = no key |
 | `value` | **yes** | Any JSON; serialised with `JSON.stringify` after templating |
 | `headers` | no | String map (values templatable) |
-| `delay_ms` | no | Wait before publishing this message; entries run in order |
+| `delay_ms` | no | Wait before publishing this message; entries of one policy run in order, without blocking the consumer (§6) |
 
 Every message the mock publishes (replies and `/kafka/publish`) gets the headers `x-api-mock-origin: api-mock-server` and `x-api-mock-message-id: <crypto.randomUUID()>` added (overriding same-named headers).
 
@@ -207,7 +207,7 @@ All routes live on the existing control port `11435`. Only the six exact method 
 }
 ```
 
-`value` holds the raw string when `parseError` is `true`. `fromMock` is `true` for the mock's own messages, as defined by loop protection in §6 (recorded, never matched). `reactions[].error` carries the message when a publish fails. The recorder keeps the most recent **1000** messages (ring buffer). A message is recorded once its reactions have completed, so a long-poll that sees it also sees its reaction results.
+`value` holds the raw string when `parseError` is `true`. `fromMock` is `true` for the mock's own messages, as defined by loop protection in §6 (recorded, never matched). `reactions[].error` carries the message when a publish fails. The recorder keeps the most recent **1000** messages (ring buffer). A message is recorded once its reactions have completed, so a long-poll that sees it also sees its reaction results. Because reactions run concurrently (§6), recording order can differ from offset order when replies are delayed.
 
 ---
 
@@ -221,7 +221,8 @@ All routes live on the existing control port `11435`. Only the six exact method 
   3. `consumer.stop()`, `subscribe` to the full set, `consumer.run()`;
   4. waits for the consumer `GROUP_JOIN` event whose assignment includes every requested topic (timeout 30s → `504 subscribe_timeout`).
   Calls are serialised through a single promise chain so concurrent registrations cannot interleave re-subscribes.
-- **Message handling:** per message — decode key/headers to UTF-8 and value via `JSON.parse`; if `fromMock`, record and stop; otherwise find the policy, run each `then` entry (delay, render, publish), then record with `matchedPolicy` and `reactions`. Handler errors are caught and recorded; they never crash the consumer.
+- **Message handling:** per message — skip offsets below the floor and advance it; decode key/headers to UTF-8 and value via `JSON.parse`; if `fromMock`, record and stop; otherwise find the policy (synchronously, so policies are chosen in message order), then run each `then` entry (delay, render, publish) and record with `matchedPolicy` and `reactions`. The consumer's `eachMessage` handler does **not** await the reactions: they run in the background (tracked in an in-flight set), so a `delay_ms` never delays other messages, recording on other topics, or a re-subscribe, and never risks the consumer's group membership. Handler errors are caught and logged; they never crash the consumer.
+- **Stopping:** `stop()` waits up to 2 s for in-flight reactions before disconnecting; reactions still sleeping after that fail to publish (recorded as `ok: false`, logged).
 - **Connection failure:** if the broker is unreachable at boot, the server still starts, `/health` reports `connected: false`, the Kafka routes return `503 kafka_unavailable`, and connection is retried every 5 s in the background.
 - **Loop protection:** the bridge remembers the id → topic of every message it publishes (bounded, insertion-ordered, 10000 entries, oldest evicted; the id is stored before `send` so the consumer can never see the message first). A consumed message is the mock's own (`fromMock`) only if it has `x-api-mock-origin: api-mock-server` **and** an `x-api-mock-message-id` remembered for that **same topic**; the id is then forgotten (claimed once). Own messages are recorded but never evaluated, so a policy cannot trigger itself. Everything else is an application message even if it carries the origin header, so applications whose middleware copies incoming headers onto outgoing messages still trigger policies.
 

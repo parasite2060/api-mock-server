@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { Kafka, logLevel, type Admin, type Consumer, type Producer } from 'kafkajs';
 import { startControlServer, startKafka, stopKafka } from './server';
 import { kafkaState, SubscribeTimeoutError } from './kafka/routes';
-import { clearPolicies, listPolicies, registerPolicy } from './kafka/policy';
+import { clearPolicies } from './kafka/policy';
 import { KafkaBridge } from './kafka/bridge';
 import { Recorder } from './kafka/recorder';
 
@@ -131,7 +131,9 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
     await post('/kafka/policies', { id: 'once', when: { topic: t }, then: [{ topic: r, value: {} }], times: 1 });
     await app.send({ topic: t, messages: [{ value: '{}' }, { value: '{}' }] });
     const { messages } = await getMessages(t, 2, 10000);
-    expect(messages.map((m: any) => m.matchedPolicy)).toEqual(['once', null]);
+    // A message is recorded when its reactions finish, so the unmatched one may be recorded first.
+    const byOffset = [...messages].sort((x: any, y: any) => Number(x.offset) - Number(y.offset));
+    expect(byOffset.map((m: any) => m.matchedPolicy)).toEqual(['once', null]);
   }, TIMEOUT);
 
   it('records a subscribed topic without a policy and long-polls', async () => {
@@ -192,36 +194,51 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
     expect(health.kafka.topics).toEqual(expect.arrayContaining([a, b]));
   }, TIMEOUT);
 
-  it('a subscribe that outlasts its timeout rejects on time while a handler sleeps, and the queue keeps working', async () => {
-    const recorder = new Recorder();
-    const slow = new KafkaBridge({ brokers: brokers!.split(','), clientId: 'timeout-test', recorder, subscribeTimeoutMs: 8000 });
-    try {
-      await slow.start();
-      const a = uniq('slow'), b = uniq('slow-b');
-      await slow.ensureSubscribed([a]);
-      const reply = uniq('slow.reply');
-      await createTopic(reply);
-      registerPolicy({ id: 'slow', when: { topic: a }, then: [{ topic: reply, value: {}, delay_ms: 14000 }] });
-      await app.send({ topic: a, messages: [{ value: '{}' }] });
-      // times:1 policies are removed when they match, so once it is gone the handler is sleeping on delay_ms.
-      while (listPolicies().some((p) => p.id === 'slow')) await Bun.sleep(50);
+  it('delayed replies to concurrent messages run in parallel and do not stall the consumer', async () => {
+    const t = uniq('delay'), r = uniq('delay.reply'), other = uniq('delay.other');
+    await post('/kafka/topics', { topics: [r, other] });
+    await post('/kafka/policies', { id: 'slow', when: { topic: t }, then: [{ topic: r, value: { n: '{{value.n}}' }, delay_ms: 3000 }], times: -1 });
+    const t0 = Date.now();
+    await app.send({ topic: t, messages: [{ value: '{"n":1}' }, { value: '{"n":2}' }, { value: '{"n":3}' }] });
+    // Other messages are recorded while the delayed reactions are still sleeping.
+    await app.send({ topic: other, messages: [{ value: '{}' }] });
+    expect((await getMessages(other, 1, 10000)).messages.length).toBe(1);
+    expect(Date.now() - t0).toBeLessThan(2500);
 
-      // consumer.stop() inside this subscribe blocks on the sleeping handler; the caller must still get its timeout on time.
+    const replies = (await getMessages(r, 3, 20000)).messages;
+    const elapsed = Date.now() - t0;
+    expect(replies.map((m: any) => m.value.n).sort()).toEqual([1, 2, 3]);
+    expect(elapsed).toBeGreaterThanOrEqual(2900);
+    expect(elapsed).toBeLessThan(3000 + 2500); // serialised handling would take ~9000
+    const triggers = (await getMessages(t, 3, 5000)).messages;
+    expect(triggers.every((m: any) => m.matchedPolicy === 'slow' && m.reactions[0].ok)).toBe(true);
+  }, TIMEOUT);
+
+  it('a subscribe that outlasts its timeout rejects on time, and a later subscribe still succeeds', async () => {
+    const recorder = new Recorder();
+    const bridge = new KafkaBridge({ brokers: brokers!.split(','), clientId: 'timeout-test', recorder, subscribeTimeoutMs: 300 });
+    try {
+      await bridge.start();
+      expect(bridge.connected).toBe(true);
+      const a = uniq('timeout');
+      // Creating the topic and joining the group takes seconds, far beyond 300 ms.
       const t0 = Date.now();
-      const err = await slow.ensureSubscribed([b]).then(() => null, (e: unknown) => e);
+      const err = await bridge.ensureSubscribed([a]).then(() => null, (e: unknown) => e);
       const elapsed = Date.now() - t0;
       expect(err).toBeInstanceOf(SubscribeTimeoutError);
-      expect((err as SubscribeTimeoutError).topics).toEqual([b]);
-      expect(elapsed).toBeGreaterThanOrEqual(7900);
-      expect(elapsed).toBeLessThan(9000);
-      expect(slow.topics).toEqual([a]);
+      expect((err as SubscribeTimeoutError).topics).toEqual([a]);
+      expect(elapsed).toBeGreaterThanOrEqual(290);
+      expect(elapsed).toBeLessThan(300 + 2000);
+      expect(bridge.topics).toEqual([]);
 
-      // Once the handler finishes, the serialised queue still subscribes new topics.
-      expect((await recorder.waitFor(a, 1, 15000)).length).toBe(1);
-      await slow.ensureSubscribed([b]);
-      expect(slow.topics).toEqual([a, b]);
+      // The abandoned attempt finishes in the background; a later subscribe with a normal timeout succeeds and consumes.
+      await bridge.ensureSubscribed([a], 20000);
+      expect(bridge.topics).toEqual([a]);
+      await app.send({ topic: a, messages: [{ value: '{"after":true}' }] });
+      const got = await recorder.waitFor(a, 1, 10000);
+      expect(got.map((m) => m.value)).toEqual([{ after: true }]);
     } finally {
-      await slow.stop();
+      await bridge.stop();
     }
   }, 60000);
 });
