@@ -236,8 +236,8 @@ All routes live on the existing control port `11435`. Only the six exact method 
 | Broker unreachable | the six Kafka routes → `503 { error: "kafka_unavailable" }`; background reconnect |
 | Other `/kafka/*` method + path | not a Kafka route: REST stub handling as for any other path |
 | Invalid JSON body | `400 { error: "invalid_json" }` |
-| Invalid policy (missing `when.topic`, `then` not an array, `then[]` missing `topic`/`value`, bad `on`/`op`, invalid regex) | `400 { error: "invalid_policy", detail }` |
-| Invalid topics / publish body | `400 { error: "invalid_request", detail }` |
+| Invalid policy (missing `when.topic`, `when.topic` or a literal (no `{{`) `then[].topic` not matching `^[a-zA-Z0-9._-]{1,249}$`, `then` not an array, `then[]` missing `topic`/`value`, bad `on`/`op`, invalid regex) | `400 { error: "invalid_policy", detail }` |
+| Invalid topics / publish body (incl. a topic name not matching `^[a-zA-Z0-9._-]{1,249}$`) | `400 { error: "invalid_request", detail }` |
 | Subscription not assigned within 30 s | `504 { error: "subscribe_timeout", topics }` |
 | `/kafka/publish` send fails | `502 { error: "publish_failed", detail }` |
 | No policy matches a message | recorded with `matchedPolicy: null` |

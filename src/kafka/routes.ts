@@ -1,5 +1,5 @@
 import { Recorder } from './recorder';
-import { clearPolicies, listPolicies, registerPolicy, validatePolicy } from './policy';
+import { clearPolicies, isValidTopicName, listPolicies, registerPolicy, TOPIC_NAME_RULE, validatePolicy } from './policy';
 import type { OutgoingMessage, PolicyInput } from './types';
 
 export interface BridgeLike {
@@ -122,6 +122,8 @@ export async function handleKafkaRoute(req: Request, url: URL): Promise<Response
     if (!Array.isArray(topics) || topics.length === 0 || !topics.every(isNonEmptyString)) {
       return invalidRequest('topics must be a non-empty array of non-empty strings');
     }
+    const bad = topics.find((t) => !isValidTopicName(t));
+    if (bad !== undefined) return invalidRequest(`invalid topic name "${bad}" (${TOPIC_NAME_RULE})`);
     const failed = await subscribe(bridge, topics as string[]);
     if (failed) return failed;
     return json({ topics: bridge.topics }, 201);
@@ -134,6 +136,7 @@ export async function handleKafkaRoute(req: Request, url: URL): Promise<Response
     if (!isObject(b) || !isNonEmptyString(b['topic']) || !('value' in b)) {
       return invalidRequest('topic (non-empty string) and value are required');
     }
+    if (!isValidTopicName(b['topic'])) return invalidRequest(`invalid topic name "${b['topic']}" (${TOPIC_NAME_RULE})`);
     if (b['key'] !== undefined && typeof b['key'] !== 'string') return invalidRequest('key must be a string');
     if (b['headers'] !== undefined && !isObject(b['headers'])) return invalidRequest('headers must be an object');
     const msg: OutgoingMessage = { topic: b['topic'], value: b['value'] };

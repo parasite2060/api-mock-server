@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import type { ConsumedMessage } from './types';
-import { clearPolicies, findPolicy, listPolicies, matchesConditions, registerPolicy, validatePolicy } from './policy';
+import { clearPolicies, findPolicy, isValidTopicName, listPolicies, matchesConditions, registerPolicy, validatePolicy } from './policy';
 
 function msg(overrides: Partial<ConsumedMessage> = {}): ConsumedMessage {
   return {
@@ -55,6 +55,16 @@ describe('kafka policy', () => {
     expect(matchesConditions([{ on: 'header', name: 'constructor', op: 'not_exists' }], msg())).toBe(true);
     expect(() => matchesConditions([{ on: 'header', name: 'constructor', op: 'contains', value: 'x' }], msg())).not.toThrow();
     expect(matchesConditions([{ on: 'header', name: 'constructor', op: 'contains', value: 'x' }], msg())).toBe(false);
+  });
+  it('validates Kafka topic names', () => {
+    for (const ok of ['orders', 'payment.requested', 'a_b-C.9', 'x'.repeat(249)]) expect(isValidTopicName(ok)).toBe(true);
+    for (const bad of ['', 'has space', 'a/b', 'ümlaut', 'x'.repeat(250), 'a{{b}}']) expect(isValidTopicName(bad)).toBe(false);
+    expect(validatePolicy({ when: { topic: 'bad topic' } })).toContain('when.topic');
+    expect(validatePolicy({ when: { topic: 'x'.repeat(250) } })).toContain('when.topic');
+    expect(validatePolicy({ when: { topic: 't' }, then: [{ topic: 'bad/topic', value: 1 }] })).toContain('then[0].topic');
+    // A templated reply topic is only known after rendering, so it is not checked up front.
+    expect(validatePolicy({ when: { topic: 't' }, then: [{ topic: '{{headers.reply-to}}', value: 1 }] })).toBeNull();
+    expect(validatePolicy({ when: { topic: 't' }, then: [{ topic: 'reply.{{key}}', value: 1 }] })).toBeNull();
   });
   it('accepts a minimal policy', () => {
     expect(validatePolicy({ when: { topic: 't' } })).toBeNull();

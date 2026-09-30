@@ -15,6 +15,14 @@ function isNonEmptyString(x: unknown): x is string {
   return typeof x === 'string' && x.length > 0;
 }
 
+const TOPIC_NAME = /^[a-zA-Z0-9._-]{1,249}$/;
+export const TOPIC_NAME_RULE = '1-249 characters from a-z, A-Z, 0-9, ".", "_", "-"';
+
+/** Kafka's legal topic name characters and length. */
+export function isValidTopicName(x: unknown): x is string {
+  return typeof x === 'string' && TOPIC_NAME.test(x);
+}
+
 function validateCondition(c: unknown, idx: number): string | null {
   const p = `when.match[${idx}]`;
   if (!isObject(c)) return `${p} must be an object`;
@@ -44,6 +52,8 @@ function validateReply(r: unknown, idx: number): string | null {
   const p = `then[${idx}]`;
   if (!isObject(r)) return `${p} must be an object`;
   if (!isNonEmptyString(r.topic)) return `${p}.topic must be a non-empty string`;
+  // A templated topic is only known once rendered; a literal one must be a legal topic name.
+  if (!r.topic.includes('{{') && !isValidTopicName(r.topic)) return `${p}.topic must be a valid topic name (${TOPIC_NAME_RULE})`;
   if (!('value' in r)) return `${p}.value is required`;
   return null;
 }
@@ -53,6 +63,7 @@ export function validatePolicy(input: unknown): string | null {
   const when = input.when;
   if (!isObject(when)) return 'when must be an object';
   if (!isNonEmptyString(when.topic)) return 'when.topic must be a non-empty string';
+  if (!isValidTopicName(when.topic)) return `when.topic must be a valid topic name (${TOPIC_NAME_RULE})`;
   if (when.match !== undefined) {
     if (!Array.isArray(when.match)) return 'when.match must be an array';
     for (let i = 0; i < when.match.length; i++) {

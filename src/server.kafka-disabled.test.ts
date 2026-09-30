@@ -74,6 +74,11 @@ describe('kafka control routes without a broker', () => {
     expect(((await (await post('/kafka/policies', [])).json()) as any).error).toBe('invalid_policy');
     expect(((await (await post('/kafka/topics', { topics: [] })).json()) as any).error).toBe('invalid_request');
     expect(((await (await post('/kafka/topics', { topics: [''] })).json()) as any).error).toBe('invalid_request');
+    expect(((await (await post('/kafka/topics', { topics: ['ok', 'not ok'] })).json()) as any).error).toBe('invalid_request');
+    expect(((await (await post('/kafka/publish', { topic: 'a/b', value: 1 })).json()) as any).error).toBe('invalid_request');
+    const badPolicy = (await (await post('/kafka/policies', { when: { topic: 'a b' } })).json()) as any;
+    expect(badPolicy.error).toBe('invalid_policy');
+    expect(badPolicy.detail).toContain('when.topic');
     expect(((await (await post('/kafka/publish', { value: 1 })).json()) as any).error).toBe('invalid_request');
     expect(((await (await post('/kafka/publish', { topic: 't', value: 1, key: 5 })).json()) as any).error).toBe('invalid_request');
     expect(((await (await post('/kafka/publish', { topic: 't', value: 1, headers: [] })).json()) as any).error).toBe('invalid_request');

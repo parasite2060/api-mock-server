@@ -419,8 +419,8 @@ All routes are on the control port (`11435`). Only these six exact method + path
 | `KAFKA_BROKERS` not set (any of the six Kafka routes, including `DELETE`) | `503 { "error": "kafka_disabled" }` |
 | Broker unreachable / bridge not connected (or a subscribe fails for a reason other than the timeout, then with a `detail`) | `503 { "error": "kafka_unavailable" }` |
 | Body is not valid JSON | `400 { "error": "invalid_json" }` |
-| Invalid policy (missing `when.topic`, `then` not an array, `then[]` missing `topic` / `value`, bad `on` / `op`, invalid regex, `times` not `-1` or `>= 1`, non-string `value` / `path` / `name`, ...) | `400 { "error": "invalid_policy", "detail": "..." }` |
-| Invalid `topics` / publish body | `400 { "error": "invalid_request", "detail": "..." }` |
+| Invalid policy (missing or invalid `when.topic`, literal `then[].topic` that is not a valid topic name, `then` not an array, `then[]` missing `topic` / `value`, bad `on` / `op`, invalid regex, `times` not `-1` or `>= 1`, non-string `value` / `path` / `name`, ...) | `400 { "error": "invalid_policy", "detail": "..." }` |
+| Invalid `topics` / publish body (including a topic name that is not 1-249 characters of `a-zA-Z0-9._-`) | `400 { "error": "invalid_request", "detail": "..." }` |
 | Topic not assigned to the consumer within 30 s | `504 { "error": "subscribe_timeout", "topics": [...] }` |
 | `POST /kafka/publish` send fails | `502 { "error": "publish_failed", "detail": "..." }` |
 | Any other `/kafka/*` method + path | Not a Kafka route: handled like any other request (REST stub match, `503 no_matching_stub`, or `404 not_found` for non-`POST`) |
