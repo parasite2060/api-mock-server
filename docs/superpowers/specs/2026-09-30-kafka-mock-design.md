@@ -256,7 +256,10 @@ All routes live on the existing control port `11435`. Only the six exact method 
   - `times: 1` fires once; unmatched message recorded with `matchedPolicy: null`;
   - record-only topic via `POST /kafka/topics` + long-poll `GET /kafka/messages`;
   - loop protection when the reply topic equals the trigger topic;
-  - `POST /kafka/publish` round-trip.
+  - `POST /kafka/publish` round-trip;
+  - an application that copies the mock reply's headers onto its own message (other topic) still triggers a policy;
+  - three messages whose policy has `delay_ms: 3000` get all replies after ~3 s (not ~9 s) while other topics keep recording;
+  - a subscribe that outlasts a tiny per-bridge timeout rejects with `SubscribeTimeoutError` on time, and a later subscribe succeeds.
   Without `KAFKA_TEST_BROKERS` the suite is skipped with a visible `describe.skipIf` label.
 - **CI:** the `test` job in `.github/workflows/docker-image.yml` gains an `apache/kafka:3.9.0` service container on `9092` and sets `KAFKA_TEST_BROKERS=localhost:9092`, so integration tests run on every PR.
 - Existing test suites must stay green untouched.
