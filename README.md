@@ -326,7 +326,7 @@ Lifecycle matches REST stubs: policies are evaluated in descending `priority`, t
 
 | `on` | Extra keys | Compared against |
 |---|---|---|
-| `value` | `path` (JSONPath, default `$`) | The JSON-parsed message value. Array results use the first element; non-string scalars are compared via `String()` |
+| `value` | `path` (JSONPath, default `$`) | The JSON-parsed message value. Array results use the first element; non-string scalars are compared via `String()`. With no `path` (or `$`) a primitive value such as `"ORDER-1"` or `42` is compared directly; a `null` value does not exist |
 | `key` | — | The message key as a UTF-8 string. An absent key does not exist |
 | `header` | `name` (required, case-insensitive) | The header value as a UTF-8 string |
 

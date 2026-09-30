@@ -132,7 +132,7 @@ src/
 
 | `on` | Extra keys | `op` values | Compared against |
 |---|---|---|---|
-| `value` | `path` (JSONPath, default `$`) | `exact`, `contains`, `regex`, `exists`, `not_exists` | JSON-parsed message value; array results use first element; non-string scalars compared via `String()` |
+| `value` | `path` (JSONPath, default `$`) | `exact`, `contains`, `regex`, `exists`, `not_exists` | JSON-parsed message value; array results use first element; non-string scalars compared via `String()`; with `path` absent or `$` the value itself is used, so primitive values (`"ORDER-1"`, `42`) match and a `null` value does not exist |
 | `key` | — | `exact`, `contains`, `regex`, `exists`, `not_exists` | Message key as UTF-8 string (absent key = not existing) |
 | `header` | `name` (case-insensitive) | `exact`, `contains`, `regex`, `exists`, `not_exists` | Header value as UTF-8 string |
 

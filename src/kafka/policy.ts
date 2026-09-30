@@ -89,7 +89,9 @@ function matchesCondition(c: Condition, msg: ConsumedMessage): boolean {
   switch (c.on) {
     case 'value': {
       if (msg.parseError) return false;
-      const result = evalJsonPath(msg.value, c.path ?? '$');
+      // evalJsonPath only walks objects/arrays, so a primitive JSON value ("ORDER-1", 42, true) is the root itself.
+      const path = c.path ?? '$';
+      const result = path === '$' ? msg.value : evalJsonPath(msg.value, path);
       if (c.op === 'exists') return result != null;
       if (c.op === 'not_exists') return result == null;
       const scalar = Array.isArray(result) ? result[0] : result;

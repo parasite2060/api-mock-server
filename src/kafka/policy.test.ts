@@ -67,6 +67,23 @@ describe('kafka policy', () => {
     expect(matchesConditions([{ on: 'key', op: 'exists' }], msg({ key: null }))).toBe(false);
     expect(matchesConditions([{ on: 'value', path: '$.amount', op: 'exact', value: '1' }], msg())).toBe(false);
   });
+  it('value conditions without a path (or with $) compare primitive JSON values directly', () => {
+    const str = msg({ value: 'ORDER-1' });
+    expect(matchesConditions([{ on: 'value', op: 'exact', value: 'ORDER-1' }], str)).toBe(true);
+    expect(matchesConditions([{ on: 'value', path: '$', op: 'exact', value: 'ORDER-1' }], str)).toBe(true);
+    expect(matchesConditions([{ on: 'value', op: 'contains', value: 'DER' }], str)).toBe(true);
+    expect(matchesConditions([{ on: 'value', op: 'exact', value: 'ORDER-2' }], str)).toBe(false);
+    expect(matchesConditions([{ on: 'value', op: 'exact', value: '42' }], msg({ value: 42 }))).toBe(true);
+    expect(matchesConditions([{ on: 'value', op: 'regex', value: '^tru' }], msg({ value: true }))).toBe(true);
+    expect(matchesConditions([{ on: 'value', op: 'exists' }], str)).toBe(true);
+    expect(matchesConditions([{ on: 'value', op: 'exists' }], msg({ value: 0 }))).toBe(true);
+    expect(matchesConditions([{ on: 'value', op: 'not_exists' }], str)).toBe(false);
+    expect(matchesConditions([{ on: 'value', op: 'not_exists' }], msg({ value: null }))).toBe(true);
+    expect(matchesConditions([{ on: 'value', path: '$', op: 'exists' }], msg({ value: null }))).toBe(false);
+    // A deeper path into a primitive still resolves to nothing.
+    expect(matchesConditions([{ on: 'value', path: '$.x', op: 'not_exists' }], str)).toBe(true);
+    expect(matchesConditions([{ on: 'value', op: 'exists' }], msg())).toBe(true);
+  });
   it('value conditions never match a parse-error message but key still does', () => {
     const m = msg({ value: 'not json', parseError: true });
     expect(matchesConditions([{ on: 'value', path: '$.x', op: 'not_exists' }], m)).toBe(false);
