@@ -56,9 +56,37 @@ jobs:
         env:
           KAFKA_TEST_BROKERS: localhost:9092
 
+  e2e:
+    name: E2E (docker compose)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Start broker + mock image
+        run: docker compose -f e2e/docker-compose.yml up -d --build --wait
+
+      - name: Run e2e suite
+        run: bun run test:e2e
+
+      - name: Mock logs
+        if: failure()
+        run: docker compose -f e2e/docker-compose.yml logs api-mock
+
+      - name: Stop stack
+        if: always()
+        run: docker compose -f e2e/docker-compose.yml down -v
+
   build-and-push:
     name: Build and push image
-    needs: test
+    needs: [test, e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: read

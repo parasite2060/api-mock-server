@@ -530,6 +530,18 @@ KAFKA_TEST_BROKERS=localhost:9092 bun test
 
 With `KAFKA_TEST_BROKERS` set the integration suite runs against that broker as well (it takes about a minute). CI starts an `apache/kafka:3.9.0` service container and sets this variable, so the integration tests run on every PR.
 
+### End-to-end suite (Docker Compose)
+
+`e2e/` holds a black-box suite that runs against the **built Docker image** and a real broker, with the test process playing "the application under test":
+
+```bash
+docker compose -f e2e/docker-compose.yml up -d --build --wait   # broker + mock image
+bun run test:e2e                                                 # e2e/kafka.e2e.test.ts
+docker compose -f e2e/docker-compose.yml down -v
+```
+
+The compose broker has two listeners: `kafka:9092` for the mock inside the network and `localhost:19092` for the host-side suite. The suite covers request/reply with templating and correlation, policy selection by priority and conditions, `times`, record-only topics with long-poll, `/kafka/publish` injection, a multi-step flow through an application that propagates headers, parallel `delay_ms` replies, and REST stubs on non-reserved `/kafka/*` paths. It is skipped unless `E2E_CONTROL_URL` is set (`bun run test:e2e` sets it), and CI runs it on every PR.
+
 ## Docker
 
 ```bash
