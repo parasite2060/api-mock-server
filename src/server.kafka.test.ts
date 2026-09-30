@@ -1,0 +1,167 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { Kafka, logLevel, type Admin, type Producer } from 'kafkajs';
+import { startControlServer, startKafka, stopKafka } from './server';
+import { kafkaState } from './kafka/routes';
+import { clearPolicies } from './kafka/policy';
+
+const brokers = process.env.KAFKA_TEST_BROKERS;
+const PORT = 11476;
+const base = `http://localhost:${PORT}`;
+const TIMEOUT = 30000;
+
+let n = 0;
+const uniq = (name: string): string => `${name}-${Date.now()}-${n++}`;
+
+function post(path: string, body: unknown): Promise<Response> {
+  return fetch(`${base}${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+}
+
+async function getMessages(topic: string, min: number, timeoutMs: number): Promise<{ messages: any[] }> {
+  const res = await fetch(`${base}/kafka/messages?topic=${encodeURIComponent(topic)}&min=${min}&timeout_ms=${timeoutMs}`);
+  return (await res.json()) as { messages: any[] };
+}
+
+describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
+  let srv: ReturnType<typeof startControlServer>;
+  let kafka: Kafka;
+  let app: Producer;
+  let admin: Admin;
+
+  async function createTopic(topic: string): Promise<void> {
+    await admin.createTopics({ topics: [{ topic }], waitForLeaders: true });
+  }
+
+  interface Seen { key: string; value: string; headers: Record<string, string> }
+
+  // An independent consumer standing in for "someone reading the reply topic".
+  function consumeOne(topic: string): { ready: Promise<void>; message: Promise<Seen> } {
+    const consumer = kafka.consumer({ groupId: `test-reader-${crypto.randomUUID()}` });
+    let ready!: Promise<void>;
+    const message = new Promise<Seen>((resolveMsg, rejectMsg) => {
+      ready = (async () => {
+        await createTopic(topic);
+        const joined = new Promise<void>((resolveJoin) => {
+          const remove = consumer.on(consumer.events.GROUP_JOIN, (e) => {
+            if (e.payload.memberAssignment[topic]) { remove(); resolveJoin(); }
+          });
+        });
+        await consumer.connect();
+        await consumer.subscribe({ topics: [topic], fromBeginning: true });
+        await consumer.run({
+          eachMessage: async ({ message: m }) => {
+            const headers: Record<string, string> = {};
+            for (const [k, v] of Object.entries(m.headers ?? {})) {
+              if (v !== undefined) headers[k] = (Array.isArray(v) ? v[0] : v)!.toString();
+            }
+            resolveMsg({ key: m.key?.toString() ?? '', value: m.value?.toString() ?? '', headers });
+            setTimeout(() => { consumer.disconnect().catch(() => {}); }, 0);
+          },
+        });
+        await joined;
+      })();
+      ready.catch(rejectMsg);
+    });
+    return { ready, message };
+  }
+
+  beforeAll(async () => {
+    srv = startControlServer(PORT);
+    await startKafka(brokers!.split(','));
+    kafka = new Kafka({ clientId: 'kafka-integration-test', brokers: brokers!.split(','), logLevel: logLevel.ERROR });
+    app = kafka.producer();
+    admin = kafka.admin();
+    await Promise.all([app.connect(), admin.connect()]);
+    const deadline = Date.now() + 20000;
+    while (!kafkaState.bridge?.connected) {
+      if (Date.now() > deadline) throw new Error('kafka bridge did not connect');
+      await Bun.sleep(100);
+    }
+  }, TIMEOUT);
+
+  afterEach(async () => {
+    await fetch(`${base}/kafka/policies`, { method: 'DELETE' });
+    await fetch(`${base}/kafka/messages`, { method: 'DELETE' });
+  });
+
+  afterAll(async () => {
+    await stopKafka();
+    await Promise.all([app?.disconnect().catch(() => {}), admin?.disconnect().catch(() => {})]);
+    srv?.stop(true);
+    kafkaState.recorder.clear();
+    clearPolicies();
+  }, TIMEOUT);
+
+  it('reacts to an application message with a templated reply seen by a real consumer', async () => {
+    const req = uniq('payment.requested'), rep = uniq('payment.completed');
+    expect((await post('/kafka/policies', {
+      when: { topic: req, match: [{ on: 'value', path: '$.amount', op: 'exact', value: '100' }] },
+      then: [{ topic: rep, key: '{{key}}', value: { orderId: '{{value.orderId}}', status: 'PAID' }, headers: { 'correlation-id': '{{headers.correlation-id}}' } }],
+    })).status).toBe(201);
+    const seen = consumeOne(rep);
+    await seen.ready;
+    await app.send({ topic: req, messages: [{ key: 'order-42', value: JSON.stringify({ orderId: '42', amount: 100 }), headers: { 'correlation-id': 'c-1' } }] });
+    const m = await seen.message;
+    expect(m.key).toBe('order-42');
+    expect(JSON.parse(m.value)).toEqual({ orderId: '42', status: 'PAID' });
+    expect(m.headers['correlation-id']).toBe('c-1');
+    expect(m.headers['x-api-mock-origin']).toBe('api-mock-server');
+  }, TIMEOUT);
+
+  it('ignores backlog and does not miss the first message sent right after registration returns', async () => {
+    const t = uniq('first');
+    await createTopic(t);
+    await app.send({ topic: t, messages: [{ value: '{"n":0}' }] }); // backlog: must be ignored
+    await post('/kafka/policies', { when: { topic: t }, then: [] });
+    await app.send({ topic: t, messages: [{ value: '{"n":1}' }] });
+    const { messages } = await getMessages(t, 1, 10000);
+    expect(messages.length).toBe(1);
+    expect(messages[0].value).toEqual({ n: 1 });
+  }, TIMEOUT);
+
+  it('times:1 fires once and later messages are recorded unmatched', async () => {
+    const t = uniq('once'), r = uniq('once.reply');
+    await post('/kafka/policies', { id: 'once', when: { topic: t }, then: [{ topic: r, value: {} }], times: 1 });
+    await app.send({ topic: t, messages: [{ value: '{}' }, { value: '{}' }] });
+    const { messages } = await getMessages(t, 2, 10000);
+    expect(messages.map((m: any) => m.matchedPolicy)).toEqual(['once', null]);
+  }, TIMEOUT);
+
+  it('records a subscribed topic without a policy and long-polls', async () => {
+    const t = uniq('audit');
+    expect((await post('/kafka/topics', { topics: [t] })).status).toBe(201);
+    setTimeout(() => app.send({ topic: t, messages: [{ key: 'a', value: '{"x":1}' }] }), 200);
+    const { messages } = await getMessages(t, 1, 10000);
+    expect(messages[0]).toMatchObject({ topic: t, key: 'a', value: { x: 1 }, matchedPolicy: null, fromMock: false });
+  }, TIMEOUT);
+
+  it('does not loop when the reply topic is the trigger topic', async () => {
+    const t = uniq('loop');
+    await post('/kafka/policies', { when: { topic: t }, then: [{ topic: t, value: { echo: true } }], times: -1 });
+    await app.send({ topic: t, messages: [{ value: '{}' }] });
+    await getMessages(t, 2, 10000);
+    await Bun.sleep(1000);
+    const all = (await getMessages(t, 0, 0)).messages;
+    expect(all.length).toBe(2);
+    expect(all.map((m: any) => m.fromMock).sort()).toEqual([false, true]);
+  }, TIMEOUT);
+
+  it('publishes on demand', async () => {
+    const t = uniq('inject');
+    await post('/kafka/topics', { topics: [t] });
+    const res = await post('/kafka/publish', { topic: t, key: 'k', value: { hi: 1 }, headers: { a: 'b' } });
+    expect(res.status).toBe(201);
+    const { messages } = await getMessages(t, 1, 10000);
+    expect(messages[0]).toMatchObject({ key: 'k', value: { hi: 1 }, fromMock: true });
+    expect(messages[0].headers.a).toBe('b');
+  }, TIMEOUT);
+
+  it('concurrent registrations for different topics both subscribe', async () => {
+    const a = uniq('conc-a'), b = uniq('conc-b');
+    const [ra, rb] = await Promise.all([post('/kafka/policies', { when: { topic: a } }), post('/kafka/policies', { when: { topic: b } })]);
+    expect([ra.status, rb.status]).toEqual([201, 201]);
+    const health = (await (await fetch(`${base}/health`)).json()) as any;
+    expect(health.kafka.topics).toEqual(expect.arrayContaining([a, b]));
+  }, TIMEOUT);
+});

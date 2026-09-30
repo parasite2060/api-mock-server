@@ -4,7 +4,8 @@ import { addProto, clearProtos, listMethods, listServices } from './control/prot
 import { setSchema, clearSchema, getSchema } from './control/schema-registry';
 import { restToCanonical, restToWire } from './transports/rest';
 import { graphqlToCanonical, graphqlToWire, validateQuery, type GraphQLBody } from './transports/graphql';
-import { handleKafkaRoute, kafkaHealth } from './kafka/routes';
+import { handleKafkaRoute, kafkaHealth, kafkaState } from './kafka/routes';
+import { KafkaBridge } from './kafka/bridge';
 import { grpcResponseObject, grpcToCanonical, statusToGrpc } from './transports/grpc';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
@@ -169,6 +170,19 @@ export async function rebindGrpcServices(): Promise<void> {
   grpcHolder.server = await buildAndBind(port);
 }
 
+export async function startKafka(brokers: string[], clientId = 'api-mock-server'): Promise<KafkaBridge> {
+  const bridge = new KafkaBridge({ brokers, clientId, recorder: kafkaState.recorder });
+  kafkaState.bridge = bridge;
+  await bridge.start();
+  return bridge;
+}
+
+export async function stopKafka(): Promise<void> {
+  const bridge = kafkaState.bridge;
+  kafkaState.bridge = null;
+  if (bridge instanceof KafkaBridge) await bridge.stop();
+}
+
 export function startControlServer(port: number) {
   return Bun.serve({
     port,
@@ -277,5 +291,12 @@ if (import.meta.main) {
   startGrpcServer(grpcPort)
     .then(() => console.log(`grpc listening on ${grpcPort}`))
     .catch((e) => console.error('grpc failed to start', e));
+  const kafkaBrokers = process.env['KAFKA_BROKERS'];
+  if (kafkaBrokers) {
+    const brokers = kafkaBrokers.split(',').map((s) => s.trim()).filter(Boolean);
+    startKafka(brokers, process.env['KAFKA_CLIENT_ID'] ?? 'api-mock-server')
+      .catch((e) => console.error('kafka bridge failed to start', e));
+    console.log(`kafka bridge -> ${brokers.join(',')}`);
+  }
   console.log(`api-mock-server control+rest on ${control.port}, graphql on ${graphqlPort}, grpc on ${grpcPort}`);
 }

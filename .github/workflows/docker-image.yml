@@ -30,6 +30,16 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +53,8 @@ jobs:
 
       - name: Run tests
         run: bun test
+        env:
+          KAFKA_TEST_BROKERS: localhost:9092
 
   build-and-push:
     name: Build and push image
