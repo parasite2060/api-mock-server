@@ -536,11 +536,13 @@ With `KAFKA_TEST_BROKERS` set the integration suite runs against that broker as 
 
 ```bash
 docker compose -f e2e/docker-compose.yml up -d --build --wait   # broker + mock image
-bun run test:e2e                                                 # e2e/kafka.e2e.test.ts
+bun run test:e2e                                                 # e2e/*.e2e.test.ts
 docker compose -f e2e/docker-compose.yml down -v
 ```
 
-The compose broker has two listeners: `kafka:9092` for the mock inside the network and `localhost:19092` for the host-side suite. The suite covers request/reply with templating and correlation, policy selection by priority and conditions, `times`, record-only topics with long-poll, `/kafka/publish` injection, a multi-step flow through an application that propagates headers, parallel `delay_ms` replies, and REST stubs on non-reserved `/kafka/*` paths. It is skipped unless `E2E_CONTROL_URL` is set (`bun run test:e2e` sets it), and CI runs it on every PR.
+`e2e/protocols.e2e.test.ts` exercises REST (every matcher type, priority/FIFO, `times`, `delay_ms`, headers, statuses, transport scoping), GraphQL (operation matching, envelope, controlled errors, schema validation) and gRPC (runtime proto upload, unary matching on fields and metadata, status mapping, `UNIMPLEMENTED` for no match and streaming). It asserts only documented behaviour, so it can also be pointed at an older image to check for regressions (`E2E_CONTROL_URL`, `E2E_GRAPHQL_URL`, `E2E_GRPC_ADDR`).
+
+The compose broker has two listeners: `kafka:9092` for the mock inside the network and `localhost:19092` for the host-side suite. `e2e/kafka.e2e.test.ts` covers request/reply with templating and correlation, policy selection by priority and conditions, `times`, record-only topics with long-poll, `/kafka/publish` injection, a multi-step flow through an application that propagates headers, parallel `delay_ms` replies, and REST stubs on non-reserved `/kafka/*` paths. It is skipped unless `E2E_CONTROL_URL` is set (`bun run test:e2e` sets it), and CI runs it on every PR.
 
 ## Docker
 
