@@ -68,7 +68,11 @@ export function startGraphQLServer(port: number) {
 function makeUnaryHandler(service: string, method: string, streaming: boolean) {
   return (call: grpc.ServerUnaryCall<object, object>, cb: grpc.sendUnaryData<object>): void => {
     if (streaming) {
-      cb({ code: grpc.status.UNIMPLEMENTED, message: 'unary only' });
+      const status = { code: grpc.status.UNIMPLEMENTED, details: 'unary only' };
+      // grpc-js passes a callback only to unary and client-streaming handlers; server-streaming
+      // and bidi calls report their status on the call itself.
+      if (typeof cb === 'function') cb(status);
+      else call.emit('error', status);
       return;
     }
     const metadata: Record<string, string> = {};
