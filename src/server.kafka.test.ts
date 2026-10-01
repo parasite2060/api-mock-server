@@ -217,19 +217,19 @@ describe.skipIf(!brokers)('kafka integration (KAFKA_TEST_BROKERS)', () => {
 
   it('a subscribe that outlasts its timeout rejects on time, and a later subscribe still succeeds', async () => {
     const recorder = new Recorder();
-    const bridge = new KafkaBridge({ brokers: brokers!.split(','), clientId: 'timeout-test', recorder, subscribeTimeoutMs: 300 });
+    const bridge = new KafkaBridge({ brokers: brokers!.split(','), clientId: 'timeout-test', recorder, subscribeTimeoutMs: 1 });
     try {
       await bridge.start();
       expect(bridge.connected).toBe(true);
       const a = uniq('timeout');
-      // Creating the topic and joining the group takes seconds, far beyond 300 ms.
+      // Creating the topic and joining the group can never finish within 1 ms, whatever the
+      // broker's group.initial.rebalance.delay.ms is (0 in the e2e compose stack, 3 s by default).
       const t0 = Date.now();
       const err = await bridge.ensureSubscribed([a]).then(() => null, (e: unknown) => e);
       const elapsed = Date.now() - t0;
       expect(err).toBeInstanceOf(SubscribeTimeoutError);
       expect((err as SubscribeTimeoutError).topics).toEqual([a]);
-      expect(elapsed).toBeGreaterThanOrEqual(290);
-      expect(elapsed).toBeLessThan(300 + 2000);
+      expect(elapsed).toBeLessThan(2000);
       expect(bridge.topics).toEqual([]);
 
       // The abandoned attempt finishes in the background; a later subscribe with a normal timeout succeeds and consumes.
