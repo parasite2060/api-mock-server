@@ -4,6 +4,8 @@ import { addProto, clearProtos, listMethods, listServices } from './control/prot
 import { setSchema, clearSchema, getSchema } from './control/schema-registry';
 import { restToCanonical, restToWire } from './transports/rest';
 import { graphqlToCanonical, graphqlToWire, validateQuery, type GraphQLBody } from './transports/graphql';
+import { handleKafkaRoute, kafkaHealth, kafkaState } from './kafka/routes';
+import { KafkaBridge } from './kafka/bridge';
 import { grpcResponseObject, grpcToCanonical, statusToGrpc } from './transports/grpc';
 
 const PORT = Number(process.env['PORT'] ?? 11435);
@@ -66,7 +68,11 @@ export function startGraphQLServer(port: number) {
 function makeUnaryHandler(service: string, method: string, streaming: boolean) {
   return (call: grpc.ServerUnaryCall<object, object>, cb: grpc.sendUnaryData<object>): void => {
     if (streaming) {
-      cb({ code: grpc.status.UNIMPLEMENTED, message: 'unary only' });
+      const status = { code: grpc.status.UNIMPLEMENTED, details: 'unary only' };
+      // grpc-js passes a callback only to unary and client-streaming handlers; server-streaming
+      // and bidi calls report their status on the call itself.
+      if (typeof cb === 'function') cb(status);
+      else call.emit('error', status);
       return;
     }
     const metadata: Record<string, string> = {};
@@ -168,6 +174,24 @@ export async function rebindGrpcServices(): Promise<void> {
   grpcHolder.server = await buildAndBind(port);
 }
 
+/** Broker list from a comma-separated KAFKA_BROKERS value; empty when unset or when it names no broker (e.g. ","). */
+export function parseKafkaBrokers(raw: string | undefined): string[] {
+  return (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+export async function startKafka(brokers: string[], clientId = 'api-mock-server'): Promise<KafkaBridge> {
+  const bridge = new KafkaBridge({ brokers, clientId, recorder: kafkaState.recorder });
+  kafkaState.bridge = bridge;
+  await bridge.start();
+  return bridge;
+}
+
+export async function stopKafka(): Promise<void> {
+  const bridge = kafkaState.bridge;
+  kafkaState.bridge = null;
+  if (bridge instanceof KafkaBridge) await bridge.stop();
+}
+
 export function startControlServer(port: number) {
   return Bun.serve({
     port,
@@ -176,9 +200,12 @@ export function startControlServer(port: number) {
       const { pathname } = url;
       const { method } = req;
 
+      const kafkaRes = await handleKafkaRoute(req, url);
+      if (kafkaRes) return kafkaRes;
+
       // GET /health
       if (method === 'GET' && pathname === '/health') {
-        return jsonResponse({ status: 'ok', protos: listServices(), schema: getSchema() != null }, 200);
+        return jsonResponse({ status: 'ok', protos: listServices(), schema: getSchema() != null, kafka: kafkaHealth() }, 200);
       }
 
       // POST /mock — register a stub
@@ -273,5 +300,14 @@ if (import.meta.main) {
   startGrpcServer(grpcPort)
     .then(() => console.log(`grpc listening on ${grpcPort}`))
     .catch((e) => console.error('grpc failed to start', e));
+  const kafkaBrokers = process.env['KAFKA_BROKERS'];
+  const brokers = parseKafkaBrokers(kafkaBrokers);
+  if (kafkaBrokers && brokers.length === 0) {
+    console.warn(`KAFKA_BROKERS="${kafkaBrokers}" lists no brokers; Kafka stays disabled`);
+  } else if (brokers.length > 0) {
+    startKafka(brokers, process.env['KAFKA_CLIENT_ID'] ?? 'api-mock-server')
+      .catch((e) => console.error('kafka bridge failed to start', e));
+    console.log(`kafka bridge -> ${brokers.join(',')}`);
+  }
   console.log(`api-mock-server control+rest on ${control.port}, graphql on ${graphqlPort}, grpc on ${grpcPort}`);
 }

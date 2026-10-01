@@ -1,12 +1,15 @@
 # api-mock-server
 
-Programmable HTTP mock server for E2E testing. Register stub responses via a REST control API; any matching request returns the configured response. Designed as an OpenAI-compatible chat completions mock but works for any HTTP endpoint.
+Programmable HTTP mock server for E2E testing. Register stub responses via a REST control API; any matching request returns the configured response. Designed as an OpenAI-compatible chat completions mock but works for any HTTP endpoint. Also mocks GraphQL and gRPC, and can react to messages your application publishes to Kafka topics (see [Kafka reaction policies](#kafka-reaction-policies)).
 
 ## Quick start
 
 ```bash
 bun install
 bun run start       # control+REST on :11435, GraphQL on :11437, gRPC on :11438
+
+# optional: also react to Kafka topics on a real broker
+KAFKA_BROKERS=localhost:9092 bun run start
 ```
 
 ## Control API
@@ -61,7 +64,7 @@ Returns `204 No Content`.
 
 ### `GET /health`
 
-Returns `200 { "status": "ok", "protos": ["ServiceName", ...], "schema": true | false }`.
+Returns `200 { "status": "ok", "protos": ["ServiceName", ...], "schema": true | false, "kafka": { "enabled": false, "connected": false, "topics": [], "policies": 0 } }`. See [Kafka reaction policies](#kafka-reaction-policies) for the `kafka` fields.
 
 ## Stub fields
 
@@ -267,6 +270,244 @@ curl -X POST http://localhost:11435/mock \
 
 ---
 
+## Kafka reaction policies
+
+The mock can act as a Kafka consumer and producer on a **real broker**: register a *policy* that says "when the application publishes a message like this to topic X, publish these reply messages", and every message the mock consumes is recorded so tests can assert on it. Policies are expressed in Kafka terms (topic, key, value, headers), not as REST stubs. Values are JSON; connections are plaintext only.
+
+Kafka is optional. It is enabled only when `KAFKA_BROKERS` (comma-separated `host:port` list) is set; without it the server behaves exactly as before and the Kafka control routes return `503 kafka_disabled`.
+
+```bash
+KAFKA_BROKERS=localhost:9092 bun run start
+```
+
+Topics are subscribed at runtime: registering a policy subscribes to its `when.topic`, and `POST /kafka/topics` subscribes to record-only topics. The mock consumes and records **only topics it is subscribed to** this way; in particular, its replies are recorded only if their topic is subscribed too (for example via `POST /kafka/topics`). Missing topics are created with the broker's defaults. Messages already on a topic before it was subscribed are ignored.
+
+### Register a policy
+
+```json
+{
+  "id": "payment-ok",
+  "when": {
+    "topic": "payment.requested",
+    "match": [
+      { "on": "value",  "path": "$.amount", "op": "exact",    "value": "100" },
+      { "on": "key",                        "op": "exact",    "value": "order-42" },
+      { "on": "header", "name": "x-tenant", "op": "contains", "value": "acme" }
+    ]
+  },
+  "then": [
+    {
+      "topic": "payment.completed",
+      "key": "{{key}}",
+      "value": { "orderId": "{{value.orderId}}", "status": "PAID" },
+      "headers": { "correlation-id": "{{headers.correlation-id}}" },
+      "delay_ms": 50
+    }
+  ],
+  "times": 1,
+  "priority": 0
+}
+```
+
+`POST /kafka/policies` returns `201 { "id": "payment-ok" }`.
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `id` | No | auto-generated | Stable identifier, returned in the `201` and in `matchedPolicy` on recorded messages |
+| `when.topic` | Yes | — | Exact topic name to react on; auto-subscribed |
+| `when.match` | No | `[]` | Conditions, ANDed. Empty matches every message on the topic |
+| `then` | No | `[]` | Messages to publish on match. `[]` = consume and swallow |
+| `times` | No | `1` | How many times to fire. `-1` = sticky until cleared. Must be `-1` or an integer `>= 1` |
+| `priority` | No | `0` | Integer. Higher = evaluated first. FIFO within same priority |
+
+Lifecycle matches REST stubs: policies are evaluated in descending `priority`, the first policy whose topic and conditions all match wins, `times` counts down and the policy is removed at 0. Only one policy fires per message.
+
+### Conditions (`when.match[]`)
+
+| `on` | Extra keys | Compared against |
+|---|---|---|
+| `value` | `path` (JSONPath, default `$`) | The JSON-parsed message value. Array results use the first element; non-string scalars are compared via `String()`. With no `path` (or `$`) a primitive value such as `"ORDER-1"` or `42` is compared directly; a `null` value does not exist |
+| `key` | — | The message key as a UTF-8 string. An absent key does not exist |
+| `header` | `name` (required, case-insensitive) | The header value as a UTF-8 string |
+
+`op` is one of `exact` (default), `contains`, `regex`, `exists`, `not_exists`; `value` is the string to compare against (unused by `exists` / `not_exists`). `value`, `path` and `name` must be strings. If the message value is not valid JSON, every `on: value` condition is false (`not_exists` included); `key` and `header` conditions still evaluate.
+
+### Reply messages (`then[]`)
+
+| Field | Required | Description |
+|---|---|---|
+| `topic` | Yes | Topic to publish to (templated) |
+| `key` | No | Message key, a string (templated). Omitted = no key |
+| `value` | Yes | Any JSON, serialised with `JSON.stringify` after templating |
+| `headers` | No | String map; values are templated |
+| `delay_ms` | No | Wait this long before publishing this message. Entries of one policy run in order; the wait does not hold up other messages (see below) |
+
+Every message the mock publishes (replies and `POST /kafka/publish`) carries two extra headers, overriding any of the same name in the template or request:
+
+- `x-api-mock-origin: api-mock-server`
+- `x-api-mock-message-id: <random UUID>`, unique per message
+
+**Loop protection.** The mock remembers the id and topic of every message it publishes (the most recent 10000). When it consumes a message that has the origin header *and* an id it published *to that same topic*, the message is its own: it is recorded with `fromMock: true` but never matched against policies, so a policy whose reply topic equals its trigger topic cannot trigger itself. Each id is recognised only once. Anything else is an application message, even if it carries `x-api-mock-origin`: an application that copies incoming headers onto the messages it sends (tracing middleware, header propagation) still triggers policies with those messages.
+
+Reactions run in the background: the mock keeps consuming while a reply waits on `delay_ms`, so three messages that each trigger a 3 s delayed reply get their replies after about 3 s, not 9 s, and other topics keep being recorded meanwhile. Policies are still chosen in the order messages arrive (so `times` counts in message order).
+
+If a reply cannot be rendered or published (for example a non-string `key` in the template, or the broker rejects the send), the policy still matches and the failure is recorded as `{ "ok": false, "error": "..." }` in the message's `reactions`. It is not reported as an HTTP error.
+
+### Templating
+
+`{{expr}}` placeholders are resolved against the message that triggered the policy, in `topic`, `key`, header values and every string inside `value`:
+
+| Expression | Resolves to |
+|---|---|
+| `key` | Message key string |
+| `topic`, `partition`, `offset` | Message metadata |
+| `value` | The entire parsed value |
+| `value.a.b[0]` | Dot/bracket path into the parsed value |
+| `headers.<name>` | Header value (name is case-insensitive) |
+
+- A string that is **exactly** one placeholder (`"{{value.amount}}"`) is replaced by the resolved value **with its JSON type preserved** (number, object, array, ...).
+- A placeholder **embedded** in a longer string (`"order-{{key}}"`) is interpolated as text; objects are `JSON.stringify`-ed. `topic`, `key` and header values are always text.
+- An unresolvable expression renders as `null` (whole-string) or an empty string (embedded). It is not an error; the recorded reaction shows what was sent.
+
+### Endpoints
+
+All routes are on the control port (`11435`). Only these six exact method + path pairs are reserved for Kafka; any other request under `/kafka/` (for example a REST stub for Confluent's `POST /kafka/v3/clusters/{cluster}/topics/{topic}/records`) goes to the REST stubs as before, whether Kafka is enabled or not.
+
+| Endpoint | Body / query | Success | Notes |
+|---|---|---|---|
+| `POST /kafka/policies` | policy (above) | `201 { "id" }` | Waits until the topic is subscribed and assigned before replying |
+| `DELETE /kafka/policies` | — | `204` | Clears policies; subscriptions are kept |
+| `POST /kafka/topics` | `{ "topics": ["a", "b"] }` | `201 { "topics": [...all subscribed] }` | Record-only subscription; waits for assignment |
+| `POST /kafka/publish` | `{ "topic", "key"?, "value", "headers"? }` | `201 { "topic", "partition", "offset" }` | Publishes as-is, no templating. `key` must be a string, `headers` an object. Like every mock-published message it carries `x-api-mock-origin` and `x-api-mock-message-id`, so when the mock consumes it, it is recorded (`fromMock: true`) but never triggers a policy |
+| `GET /kafka/messages` | `?topic=&min=&timeout_ms=` | `200 { "messages": [...] }` | Long-poll, see below |
+| `DELETE /kafka/messages` | — | `204` | Clears the recorder |
+| `GET /health` | — | `200` | Adds `kafka: { enabled, connected, topics, policies }` |
+
+`GET /kafka/messages` returns as soon as at least `min` messages (default `0`) for `topic` (default: all topics) are recorded, or after `timeout_ms` (default `0`, max `30000`) with whatever exists. Messages come back in the order they were recorded (a message is recorded once its reactions finish, so one with a delayed reply can come after later messages; sort by `partition`/`offset` if you need log order), so `?topic=payment.completed&min=1&timeout_ms=10000` is the way to wait for a reply without sleeping. The recorder keeps the most recent 1000 messages.
+
+**Register policies before triggering the application.** `POST /kafka/policies` and `POST /kafka/topics` return only once the mock's consumer has been assigned the topic. On a fresh subscribe this typically takes a few seconds because the broker rebalances the consumer group; it returns `504 subscribe_timeout` after 30 s. Once it has returned, the next message on that topic is not missed. Registering another policy on an already-subscribed topic returns immediately, so in a test suite subscribe once (for example in a `beforeAll`) and use `DELETE /kafka/policies` + `DELETE /kafka/messages` between tests.
+
+### Recorded message
+
+```json
+{
+  "topic": "payment.requested",
+  "partition": 0,
+  "offset": "17",
+  "timestamp": "1790739531870",
+  "key": "order-42",
+  "value": { "orderId": "42", "amount": 100 },
+  "headers": { "x-tenant": "acme" },
+  "parseError": false,
+  "fromMock": false,
+  "matchedPolicy": "payment-ok",
+  "reactions": [ { "topic": "payment.completed", "ok": true } ]
+}
+```
+
+- `matchedPolicy` is `null` when no policy matched (or the message is `fromMock`).
+- When the value is not valid JSON, `parseError` is `true` and `value` holds the raw string.
+- `fromMock` is `true` for the mock's own messages, recognised by `x-api-mock-origin` plus a `x-api-mock-message-id` it published to that topic (see loop protection above).
+- `reactions[].error` carries the failure message when `ok` is `false`.
+- Header names are lower-cased.
+- A message is recorded after its reactions have completed, so a long-poll that sees it also sees its reaction results.
+
+### Errors
+
+| Situation | Response |
+|---|---|
+| `KAFKA_BROKERS` not set (any of the six Kafka routes, including `DELETE`) | `503 { "error": "kafka_disabled" }` |
+| Broker unreachable / bridge not connected (or a subscribe fails for a reason other than the timeout, then with a `detail`) | `503 { "error": "kafka_unavailable" }` |
+| Body is not valid JSON | `400 { "error": "invalid_json" }` |
+| Invalid policy (missing or invalid `when.topic`, literal `then[].topic` that is not a valid topic name, `then` not an array, `then[]` missing `topic` / `value`, bad `on` / `op`, invalid regex, `times` not `-1` or `>= 1`, non-string `value` / `path` / `name`, ...) | `400 { "error": "invalid_policy", "detail": "..." }` |
+| Invalid `topics` / publish body (including a topic name that is not 1-249 characters of `a-zA-Z0-9._-`) | `400 { "error": "invalid_request", "detail": "..." }` |
+| Topic not assigned to the consumer within 30 s | `504 { "error": "subscribe_timeout", "topics": [...] }` |
+| `POST /kafka/publish` send fails | `502 { "error": "publish_failed", "detail": "..." }` |
+| Any other `/kafka/*` method + path | Not a Kafka route: handled like any other request (REST stub match, `503 no_matching_stub`, or `404 not_found` for non-`POST`) |
+| No policy matches a consumed message | Recorded with `matchedPolicy: null` |
+| Consumed value is not JSON | Recorded with `parseError: true` and the raw string as `value` |
+| Reply fails to render or publish | Recorded in `reactions[]` with `ok: false, error` |
+
+If the broker is unreachable at boot the server still starts: `/health` shows `kafka.connected: false` and the mock retries the connection roughly every 5 s. A policy is stored before its subscription completes, so after a `504 subscribe_timeout` it remains registered (`DELETE /kafka/policies` clears it).
+
+### Docker Compose (broker + mock)
+
+A single-node KRaft broker reachable as `kafka:9092` from the mock container:
+
+```yaml
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+  api-mock:
+    image: api-mock-server
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:9092
+    ports:
+      - "11435:11435"
+```
+
+The healthcheck is the same broker probe CI uses, so the mock (and anything else that `depends_on` the broker being healthy) starts only once the broker answers; the mock would otherwise retry every ~5 s until it does. Your application under test must also reach the broker as `kafka:9092`. To reach it from the host as well, add a second listener advertised as `localhost`; the single advertised listener above only works inside the compose network.
+
+### Copy-paste request/reply example
+
+```bash
+# 1. Register a policy: when payment.requested arrives, publish payment.completed
+curl -X POST http://localhost:11435/kafka/policies \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id": "payment-ok",
+    "when": { "topic": "payment.requested" },
+    "then": [{
+      "topic": "payment.completed",
+      "key": "{{key}}",
+      "value": { "orderId": "{{value.orderId}}", "amount": "{{value.amount}}", "status": "PAID" }
+    }],
+    "times": 1
+  }'
+# -> 201 {"id":"payment-ok"}   (returns once the mock is subscribed)
+
+# 2. Also subscribe to the reply topic so the mock records it for assertions
+curl -X POST http://localhost:11435/kafka/topics \
+  -H 'Content-Type: application/json' \
+  -d '{"topics": ["payment.completed"]}'
+
+# 3. The application under test publishes to payment.requested. To try it by hand with the
+#    broker's console producer (key:value):
+echo 'order-42:{"orderId":"42","amount":100}' | docker compose exec -T kafka \
+  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 \
+  --topic payment.requested --property parse.key=true --property key.separator=:
+
+# 4. Wait (up to 10 s) for the reply and assert on it
+curl 'http://localhost:11435/kafka/messages?topic=payment.completed&min=1&timeout_ms=10000'
+# -> {"messages":[{"topic":"payment.completed","key":"order-42","value":{"orderId":"42","amount":100,"status":"PAID"},"fromMock":true,...}]}
+
+# 5. Between tests
+curl -X DELETE http://localhost:11435/kafka/policies
+curl -X DELETE http://localhost:11435/kafka/messages
+```
+
+---
+
 ## Matching behaviour
 
 - All matchers in the array are ANDed — a request must satisfy every matcher.
@@ -281,7 +522,27 @@ curl -X POST http://localhost:11435/mock \
 bun test
 ```
 
-53 tests covering REST matcher types, stub lifecycle, GraphQL transport, gRPC transport (including runtime proto rebind), and control-plane endpoints.
+This runs the REST matcher types, stub lifecycle, GraphQL transport, gRPC transport (including runtime proto rebind), control-plane endpoints, and the Kafka policy, template, recorder and control-route unit tests. The Kafka integration suite (`src/server.kafka.test.ts`) is skipped unless `KAFKA_TEST_BROKERS` points at a real broker:
+
+```bash
+KAFKA_TEST_BROKERS=localhost:9092 bun test
+```
+
+With `KAFKA_TEST_BROKERS` set the integration suite runs against that broker as well (it takes about a minute). CI starts an `apache/kafka:3.9.0` service container and sets this variable, so the integration tests run on every PR.
+
+### End-to-end suite (Docker Compose)
+
+`e2e/` holds a black-box suite that runs against the **built Docker image** and a real broker, with the test process playing "the application under test":
+
+```bash
+docker compose -f e2e/docker-compose.yml up -d --build --wait   # broker + mock image
+bun run test:e2e                                                 # e2e/*.e2e.test.ts
+docker compose -f e2e/docker-compose.yml down -v
+```
+
+`e2e/protocols.e2e.test.ts` exercises REST (every matcher type, priority/FIFO, `times`, `delay_ms`, headers, statuses, transport scoping), GraphQL (operation matching, envelope, controlled errors, schema validation) and gRPC (runtime proto upload, unary matching on fields and metadata, status mapping, `UNIMPLEMENTED` for no match and streaming). It asserts only documented behaviour, so it can also be pointed at an older image to check for regressions (`E2E_CONTROL_URL`, `E2E_GRAPHQL_URL`, `E2E_GRPC_ADDR`).
+
+The compose broker has two listeners: `kafka:9092` for the mock inside the network and `localhost:19092` for the host-side suite. `e2e/kafka.e2e.test.ts` covers request/reply with templating and correlation, policy selection by priority and conditions, `times`, record-only topics with long-poll, `/kafka/publish` injection, a multi-step flow through an application that propagates headers, parallel `delay_ms` replies, and REST stubs on non-reserved `/kafka/*` paths. It is skipped unless `E2E_CONTROL_URL` is set (`bun run test:e2e` sets it), and CI runs it on every PR.
 
 ## Docker
 
@@ -346,3 +607,6 @@ it('light dream extracts a decision', async () => {
 | `PORT` | `11435` | Control + REST listener port |
 | `GRAPHQL_PORT` | `11437` | GraphQL listener port |
 | `GRPC_PORT` | `11438` | gRPC listener port |
+| `KAFKA_BROKERS` | *(unset)* | Comma-separated broker list, e.g. `kafka:9092`. Enables the Kafka bridge; unset = Kafka disabled. A value that names no broker (e.g. `,`) also leaves Kafka disabled, with a warning in the log |
+| `KAFKA_CLIENT_ID` | `api-mock-server` | Kafka client id used when `KAFKA_BROKERS` is set |
+| `KAFKA_TEST_BROKERS` | *(unset)* | Test-only: broker address that enables the Kafka integration tests in `bun test` |

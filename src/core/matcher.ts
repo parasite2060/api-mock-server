@@ -3,7 +3,7 @@ import micromatch from 'micromatch';
 import { runInNewContext } from 'node:vm';
 import type { IncomingRequest, MatcherDef } from './types';
 
-function matchString(actual: string, op: string | undefined, value: string): boolean {
+export function matchString(actual: string, op: string | undefined, value: string): boolean {
   switch (op) {
     case 'exact':
       return actual === value;
@@ -17,6 +17,22 @@ function matchString(actual: string, op: string | undefined, value: string): boo
       return micromatch.isMatch(actual, value);
     default:
       return actual === value;
+  }
+}
+
+function _evalJsonPathRaw(json: unknown, path: string): unknown {
+  const normalizedPath = path.replace(/\[(-\d+)\]/g, '[$1:]');
+  return JSONPath({ path: normalizedPath, json, wrap: false });
+}
+
+export function evalJsonPath(json: unknown, path: string): unknown {
+  if (json == null || typeof json !== 'object') {
+    return undefined;
+  }
+  try {
+    return _evalJsonPathRaw(json, path);
+  } catch {
+    return undefined;
   }
 }
 
@@ -36,9 +52,7 @@ export function matchesOne(matcher: MatcherDef, req: IncomingRequest): boolean {
 
     case 'body': {
       if (matcher.op === 'json_path') {
-        // Normalize [-N] → [-N:] for jsonpath-plus compatibility (it doesn't support bare negative indices)
-        const path = (matcher.path ?? '$').replace(/\[(-\d+)\]/g, '[$1:]');
-        const result = JSONPath({ path, json: req.body as object, wrap: false });
+        const result = _evalJsonPathRaw(req.body, matcher.path ?? '$');
         if (matcher.match === 'exists') return result != null;
         if (matcher.match === 'not_exists') return result == null;
         // When path returns an array (e.g. slice notation), use first element
